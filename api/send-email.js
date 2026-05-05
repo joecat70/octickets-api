@@ -38,7 +38,7 @@ module.exports = async function handler(req, res) {
     return res.status(500).json({ error: 'Failed to save token' });
   }
 
-  const claimUrl = `${venueUrl || 'https://theetestsite.eth.limo'}/?claim=${token}`;
+  const claimUrl = `${venueUrl || 'https://theetestsite.eth.limo'}/#claim=${token}`;
 
   const { error: emailError } = await resend.emails.send({
     from: 'OC Tickets Live <tickets@octicketslive.com>',
