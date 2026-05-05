@@ -68,7 +68,7 @@ module.exports = async (req, res) => {
       line_items: lineItems,
       mode: 'payment',
       customer_email: buyerEmail || undefined,
-      success_url: (venueUrl || 'https://theetestsite.eth.limo') + '/?stripe_success=true&session_id={CHECKOUT_SESSION_ID}',
+      success_url: ((venueUrl || 'https://theetestsite.eth.limo').replace(/\/+$/, '') || 'https://theetestsite.eth.limo') + '/?stripe_success=true&session_id={CHECKOUT_SESSION_ID}',
       cancel_url: (venueUrl || 'https://theetestsite.eth.limo') + '/?stripe_cancel=true',
       metadata: {
         eventName: eventName || '',
