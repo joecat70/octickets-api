@@ -24,7 +24,7 @@ module.exports = async (req, res) => {
 
     if (dbError) return res.status(500).json({ error: 'Failed to save token' });
 
-    const claimUrl = `${venueUrl || 'https://theetestsite.eth.limo'}/?claim=${token}`;
+        const claimUrl = `${(venueUrl || 'https://theetestsite.eth.limo').replace(/\/+$/, '')}/#claim=${token}`;
     const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
     await client.messages.create({
