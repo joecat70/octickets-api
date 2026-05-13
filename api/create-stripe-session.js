@@ -1,4 +1,4 @@
-const Stripe = require('stripe');
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY_V2 || process.env.STRIPE_SECRET_KEY);
 
 // Payment split: 90% Venue, 10% OC Tickets Live
 const PLATFORM_FEE_PERCENT = 0.10;
