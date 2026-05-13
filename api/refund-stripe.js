@@ -36,7 +36,7 @@ module.exports = async function handler(req, res) {
     return res.status(400).json({ error: 'ticketId is required' });
   }
 
-  const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
+  const stripe = Stripe(process.env.STRIPE_SECRET_KEY_V2 || process.env.STRIPE_SECRET_KEY);
 
   try {
     // ── 1. Retrieve the checkout session ─────────────────────────────
