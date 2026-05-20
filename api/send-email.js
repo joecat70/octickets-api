@@ -1,220 +1,226 @@
-// api/stripe-webhook.js
-// Stripe server-side webhook — confirms tickets on checkout.session.completed.
-// Calls /api/send-email for ticket delivery (same template as client path).
+// api/send-email.js
+// Ticket confirmation email — single template used by both client and webhook paths.
+// Creates a claim token in Supabase, then sends via Resend.
 
-const Stripe = require('stripe');
+const { Resend } = require('resend');
 const { createClient } = require('@supabase/supabase-js');
+const { v4: uuidv4 } = require('uuid');
 
-// Disable Vercel's default body parser — Stripe needs the raw body to verify signature
-module.exports.config = { api: { bodyParser: false } };
+module.exports = async function handler(req, res) {
+  res.setHeader('Access-Control-Allow-Origin',  '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method !== 'POST')   return res.status(405).json({ error: 'Method not allowed' });
 
-function getSupabase() {
-  const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_KEY;
-  if (!url || !key) throw new Error('Supabase env vars not set');
-  return createClient(url, key);
-}
+  const {
+    email,
+    name,
+    ticketId,
+    ticketIds,
+    eventName,
+    seat,
+    seats,
+    seatCount,
+    venueUrl,
+  } = req.body;
 
-// Resolve our own Vercel API base URL for internal fetch to /api/send-email.
-// VERCEL_URL is injected automatically by Vercel (no https:// prefix).
-// Override with API_BASE_URL env var if you need a fixed URL.
-function getApiBase() {
-  if (process.env.API_BASE_URL) return process.env.API_BASE_URL.replace(/\/+$/, '');
-  if (process.env.VERCEL_URL)   return `https://${process.env.VERCEL_URL}`;
-  return 'https://octickets-api.vercel.app'; // known fallback
-}
-
-function generateTotpSeed() {
-  const bytes = [];
-  for (let i = 0; i < 20; i++) bytes.push(Math.floor(Math.random() * 256));
-  return bytes.map(b => b.toString(16).padStart(2, '0')).join('').toUpperCase();
-}
-
-module.exports = async (req, res) => {
-  if (req.method !== 'POST') return res.status(405).end();
-
-  const stripeKey     = process.env.STRIPE_SECRET_KEY_V2 || process.env.STRIPE_SECRET_KEY;
-  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
-
-  if (!stripeKey || !webhookSecret) {
-    console.error('stripe-webhook: missing env vars');
-    return res.status(500).end();
+  if (!email || (!ticketId && (!ticketIds || !ticketIds.length))) {
+    return res.status(400).json({ error: 'Missing email or ticketId' });
   }
 
-  const stripe = Stripe(stripeKey);
+  const allTicketIds = ticketIds?.length ? ticketIds : [ticketId];
+  const allSeats     = seats?.length     ? seats     : (seat ? [seat] : allTicketIds.map(() => 'Reserved Seat'));
+  const totalCount   = seatCount || allTicketIds.length;
+  const buyerName    = name || 'Ticket Holder';
+  const primaryId    = allTicketIds[0];
+  const baseUrl      = (venueUrl || 'https://octicketslive.eth.limo').replace(/\/+$/, '');
 
-  // ── 1. Verify Stripe signature ─────────────────────────────────────────────
-  let event;
+  // ── 1. Create claim token ──────────────────────────────────────────────────
+  const token     = uuidv4();
+  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
+
+  const db = createClient(
+    process.env.SUPABASE_URL,
+    process.env.SUPABASE_SERVICE_KEY   // was incorrectly SUPABASE_SECRET_KEY
+  );
+
+  const { error: dbError } = await db.from('claim_tokens').insert({
+    token,
+    ticket_id:  primaryId,
+    phone:      email,
+    expires_at: expiresAt.toISOString(),
+    claimed:    false,
+  });
+
+  if (dbError) {
+    console.error('send-email: DB error saving claim token:', dbError);
+    return res.status(500).json({ error: 'Failed to save token' });
+  }
+
+  // ── 2. Build claim URL ─────────────────────────────────────────────────────
+  const claimUrl = `${baseUrl}/#claim=${token}`;
+
+  // ── 3. Build and send email ────────────────────────────────────────────────
+  const resend = new Resend(process.env.RESEND_API_KEY);
+
+  const seatLabel = allSeats.length === 1
+    ? allSeats[0]
+    : `${allSeats.length} seats — ${allSeats.join(', ')}`;
+
+  const seatRows = allSeats.map((s, i) => `
+    <tr>
+      <td style="padding:10px 16px;border-bottom:1px solid #1e1c14;font-family:-apple-system,sans-serif;font-size:13px;color:#d4c88a">
+        ${allTicketIds[i] || ''}
+      </td>
+      <td style="padding:10px 16px;border-bottom:1px solid #1e1c14;font-family:-apple-system,sans-serif;font-size:13px;color:#f5f0e6;font-weight:600">
+        ${s}
+      </td>
+    </tr>`).join('');
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Your Tickets — OC Tickets Live</title>
+</head>
+<body style="margin:0;padding:0;background:#0a0900;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif">
+
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#0a0900;padding:32px 16px">
+  <tr><td align="center">
+  <table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%">
+
+    <!-- Header -->
+    <tr>
+      <td style="background:#0e0c08;border:1px solid #2a2310;border-radius:8px 8px 0 0;padding:24px 32px;text-align:center;border-bottom:1px solid #c9a84c40">
+        <table width="100%" cellpadding="0" cellspacing="0">
+          <tr>
+            <td align="center">
+              <div style="display:inline-block;background:#c9a84c;width:36px;height:36px;border-radius:50%;line-height:36px;text-align:center;font-size:18px;margin-bottom:10px">🎟</div>
+              <div style="font-family:Georgia,serif;font-size:22px;font-weight:700;color:#f5f0e6;letter-spacing:4px;text-transform:uppercase">OC Tickets Live</div>
+              <div style="font-size:11px;color:#8a7f5c;letter-spacing:1px;margin-top:4px;font-family:monospace">octicketslive.eth · Reserved Seating</div>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+
+    <!-- Gold bar -->
+    <tr>
+      <td style="height:2px;background:linear-gradient(90deg,transparent,#c9a84c,transparent)"></td>
+    </tr>
+
+    <!-- Body -->
+    <tr>
+      <td style="background:#0e0c08;border:1px solid #2a2310;border-top:none;padding:32px">
+
+        <!-- Greeting -->
+        <p style="margin:0 0 24px;font-size:15px;color:#d4c88a;line-height:1.6">
+          Hi ${buyerName},<br><br>
+          Your ${totalCount === 1 ? 'ticket is' : `${totalCount} tickets are`} confirmed.
+          Use the link below to access your ticket${totalCount > 1 ? 's' : ''} at any time.
+        </p>
+
+        <!-- Event block -->
+        <table width="100%" cellpadding="0" cellspacing="0" style="background:#13110a;border:1px solid #2a2310;border-radius:6px;margin-bottom:24px">
+          <tr>
+            <td style="padding:16px;border-bottom:1px solid #1e1c14">
+              <div style="font-size:10px;color:#8a7f5c;letter-spacing:1.5px;text-transform:uppercase;font-family:monospace;margin-bottom:6px">Event</div>
+              <div style="font-size:18px;font-weight:700;color:#f5f0e6;font-family:Georgia,serif">${eventName || 'Your Event'}</div>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:16px">
+              <div style="font-size:10px;color:#8a7f5c;letter-spacing:1.5px;text-transform:uppercase;font-family:monospace;margin-bottom:8px">
+                ${totalCount === 1 ? 'Your Seat' : `Your Seats (${totalCount})`}
+              </div>
+              <table width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <th style="padding:8px 16px;background:#0a0900;font-size:10px;color:#8a7f5c;text-transform:uppercase;letter-spacing:1px;font-family:monospace;font-weight:400;text-align:left">Ticket ID</th>
+                  <th style="padding:8px 16px;background:#0a0900;font-size:10px;color:#8a7f5c;text-transform:uppercase;letter-spacing:1px;font-family:monospace;font-weight:400;text-align:left">Seat</th>
+                </tr>
+                ${seatRows}
+              </table>
+            </td>
+          </tr>
+        </table>
+
+        <!-- CTA -->
+        <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px">
+          <tr>
+            <td align="center">
+              <a href="${claimUrl}"
+                style="display:inline-block;background:#c9a84c;color:#000;text-decoration:none;font-weight:700;font-size:14px;letter-spacing:1px;padding:14px 36px;border-radius:4px;text-transform:uppercase">
+                Access My Ticket${totalCount > 1 ? 's' : ''} →
+              </a>
+            </td>
+          </tr>
+        </table>
+
+        <!-- Link fallback -->
+        <table width="100%" cellpadding="0" cellspacing="0" style="background:#13110a;border:1px solid #2a2310;border-radius:6px;margin-bottom:24px;padding:16px">
+          <tr>
+            <td style="padding:16px">
+              <div style="font-size:10px;color:#8a7f5c;letter-spacing:1.5px;text-transform:uppercase;font-family:monospace;margin-bottom:8px">Secure Ticket Link</div>
+              <div style="font-size:11px;color:#c9a84c;word-break:break-all;font-family:monospace;line-height:1.6">${claimUrl}</div>
+              <div style="font-size:11px;color:#4a4530;margin-top:8px">Valid for 7 days · Tap or copy into your browser</div>
+            </td>
+          </tr>
+        </table>
+
+        <!-- Security note -->
+        <table width="100%" cellpadding="0" cellspacing="0" style="background:#0f0e0a;border:1px solid #1e1c14;border-radius:6px;margin-bottom:8px">
+          <tr>
+            <td style="padding:14px 16px">
+              <div style="font-size:11px;color:#6a6040;line-height:1.7;font-family:monospace">
+                🔒 Your ticket includes a rotating QR code that refreshes every 15 seconds.<br>
+                Screenshots are not valid at the door — always open your live ticket link.<br>
+                Do not share this email or your claim link with anyone.
+              </div>
+            </td>
+          </tr>
+        </table>
+
+      </td>
+    </tr>
+
+    <!-- Footer -->
+    <tr>
+      <td style="background:#080700;border:1px solid #2a2310;border-top:none;border-radius:0 0 8px 8px;padding:20px 32px;text-align:center">
+        <div style="font-size:10px;color:#4a4530;font-family:monospace;line-height:1.8">
+          OC Tickets Live · octicketslive.com<br>
+          Questions? Reply to this email.<br>
+          This link was sent to ${email}
+        </div>
+      </td>
+    </tr>
+
+  </table>
+  </td></tr>
+</table>
+
+</body>
+</html>`;
+
   try {
-    const rawBody = await new Promise((resolve, reject) => {
-      const chunks = [];
-      req.on('data', chunk => chunks.push(chunk));
-      req.on('end',  () => resolve(Buffer.concat(chunks)));
-      req.on('error', reject);
+    const { error: emailError } = await resend.emails.send({
+      from:    'OC Tickets Live <tickets@octicketslive.com>',
+      to:      email,
+      subject: `Your Ticket${totalCount > 1 ? `s (${totalCount})` : ''} — ${eventName || 'OC Tickets Live'}`,
+      html,
     });
-    const sig = req.headers['stripe-signature'];
-    event = stripe.webhooks.constructEvent(rawBody, sig, webhookSecret);
-  } catch (err) {
-    console.error('Webhook signature verification failed:', err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
-  }
 
-  if (event.type !== 'checkout.session.completed') {
-    return res.status(200).json({ received: true });
-  }
-
-  const session = event.data.object;
-
-  if (session.payment_status !== 'paid') {
-    console.log('Webhook: session not paid, skipping:', session.id);
-    return res.status(200).json({ received: true });
-  }
-
-  // ── 2. Parse metadata ──────────────────────────────────────────────────────
-  const meta      = session.metadata || {};
-  const sessionId = session.id;
-  const email     = session.customer_email
-                 || session.customer_details?.email
-                 || meta.buyer_email
-                 || '';
-
-  const holdIds = meta.hold_ids
-    ? meta.hold_ids.split(',').map(s => s.trim()).filter(Boolean)
-    : [];
-
-  if (!holdIds.length) {
-    console.warn('Webhook: no hold_ids in metadata for session', sessionId);
-    return res.status(200).json({ received: true });
-  }
-
-  console.log(`Webhook: processing session ${sessionId} — ${holdIds.length} seat(s)`);
-
-  try {
-    const db = getSupabase();
-
-    const txHash    = 'stripe:' + sessionId;
-    const buyerId   = 'stripe-' + sessionId.slice(-8);
-    const buyerName = meta.buyer_name    || '';
-    const buyerPhone= meta.buyer_phone   || '';
-    const buyerZip  = meta.buyer_zip     || '';
-    const ageRange  = meta.buyer_age_range || '';
-    const referral  = meta.buyer_referral  || '';
-    const optInEmail= meta.opt_in_email === 'true';
-    const optInSms  = meta.opt_in_sms   === 'true';
-    const payment   = meta.payment       || 'Card';
-    const wallet    = meta.wallet        || null;
-    const eventName = meta.event_name    || '';
-    const venueUrl  = meta.venue_url     || 'https://octicketslive.eth.limo';
-
-    // ── 3. Idempotency check — skip if client path already confirmed ───────
-    const { data: existingTickets } = await db
-      .from('tickets')
-      .select('id, status, totp_seed, seat, seat_key')
-      .in('id', holdIds);
-
-    const alreadyValid = existingTickets?.every(t => t.status === 'valid');
-    if (alreadyValid) {
-      console.log('Webhook: tickets already valid (client ran first) —', sessionId);
-      return res.status(200).json({ received: true });
+    if (emailError) {
+      console.error('send-email: Resend error:', emailError);
+      return res.status(500).json({ error: 'Email delivery failed', detail: emailError });
     }
 
-    // ── 4. Confirm tickets — update holds → valid ──────────────────────────
-    // Use Promise.all for parallel updates instead of sequential loop
-    await Promise.all(holdIds.map(async holdId => {
-      const existing  = existingTickets?.find(t => t.id === holdId);
-      const totpSeed  = existing?.totp_seed || generateTotpSeed();
-
-      const { error: updateErr } = await db
-        .from('tickets')
-        .update({
-          status:      'valid',
-          tx_hash:     txHash,
-          buyer_id:    buyerId,
-          buyer_email: email     || null,
-          buyer_name:  buyerName || null,
-          totp_seed:   totpSeed,
-          payment,
-          wallet:      wallet    || null,
-        })
-        .eq('id', holdId);
-
-      if (updateErr) {
-        console.error(`Webhook: failed to update ticket ${holdId}:`, updateErr.message);
-      }
-    }));
-
-    // ── 5. Upsert buyer profile ────────────────────────────────────────────
-    if (email) {
-      const { data: existing } = await db
-        .from('buyers')
-        .select('visit_count')
-        .eq('email', email)
-        .maybeSingle();
-
-      await db.from('buyers').upsert({
-        id:           buyerId,
-        email,
-        name:         buyerName  || null,
-        phone:        buyerPhone || null,
-        wallet:       wallet     || null,
-        zip:          buyerZip   || null,
-        age_range:    ageRange   || null,
-        referral:     referral   || null,
-        opt_in_email: optInEmail,
-        opt_in_sms:   optInSms,
-        visit_count:  (existing?.visit_count || 0) + 1,
-        updated_at:   new Date().toISOString(),
-      }, { onConflict: 'email' });
-    }
-
-    // ── 6. Send ticket email via /api/send-email (shared template) ─────────
-    if (email) {
-      const { data: ticketRows } = await db
-        .from('tickets')
-        .select('id, seat, seat_key, event_name, tier_name, price')
-        .in('id', holdIds);
-
-      const seats     = (ticketRows || []).map(t => t.seat || t.seat_key || '');
-      const resolvedEventName = eventName
-                             || ticketRows?.[0]?.event_name
-                             || '';
-
-      const apiBase = getApiBase();
-
-      try {
-        const emailRes = await fetch(`${apiBase}/api/send-email`, {
-          method:  'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            email,
-            name:      buyerName || 'Guest',
-            ticketIds: holdIds,
-            ticketId:  holdIds[0],
-            seats,
-            seat:      seats[0] || '',
-            seatCount: holdIds.length,
-            eventName: resolvedEventName,
-            venueUrl,
-          }),
-        });
-        const emailData = await emailRes.json();
-        if (emailData.success) {
-          console.log(`Webhook: ✓ email sent to ${email} for ${holdIds.length} ticket(s)`);
-        } else {
-          console.warn('Webhook: send-email returned error:', emailData.error);
-        }
-      } catch (emailErr) {
-        console.error('Webhook: send-email fetch failed:', emailErr.message);
-        // Non-fatal — ticket is confirmed in DB regardless
-      }
-    }
-
-    console.log(`Webhook: ✓ ${holdIds.length} ticket(s) confirmed — session ${sessionId}`);
-    return res.status(200).json({ received: true });
+    console.log(`send-email: ✓ sent to ${email} — ${totalCount} ticket(s) — event: ${eventName}`);
+    return res.status(200).json({ success: true });
 
   } catch (err) {
-    console.error('Webhook processing error:', err);
-    // Always return 200 so Stripe doesn't retry endlessly
-    return res.status(200).json({ received: true, warning: 'Processing error logged' });
+    console.error('send-email: unexpected error:', err);
+    return res.status(500).json({ error: 'Unexpected error', detail: err.message });
   }
 };
