@@ -16,7 +16,6 @@
 //
 // IMPORTANT: Vercel's body parser must be disabled for this route so that
 // Stripe can verify its signature against the raw request bytes.
-// The export below tells Vercel not to parse the body automatically.
 
 const Stripe = require('stripe');
 const { createClient } = require('@supabase/supabase-js');
@@ -25,7 +24,7 @@ const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...ar
 // ── Vercel config: disable automatic body parsing ──────────────────────────
 // Without this, req.body is a parsed object and stripe.webhooks.constructEvent()
 // will always throw — it needs the raw Buffer to verify the signature.
-export const config = { api: { bodyParser: false } };
+module.exports.config = { api: { bodyParser: false } };
 
 // Supabase client using the SERVICE KEY (bypasses RLS) — webhook writes are
 // server-authoritative and must not be blocked by row-level security policies.
@@ -50,8 +49,6 @@ module.exports = async (req, res) => {
   const stripe = Stripe(stripeKey);
 
   // ── 1. Collect raw body bytes, then verify Stripe signature ───────────────
-  // bodyParser is disabled via export config above, so we stream manually.
-  // Stripe's constructEvent needs the exact raw bytes to verify the signature.
   let event;
   try {
     const rawBody = await new Promise((resolve, reject) => {
@@ -69,12 +66,11 @@ module.exports = async (req, res) => {
 
   // ── 2. Only handle checkout.session.completed ──────────────────────────────
   if (event.type !== 'checkout.session.completed') {
-    return res.status(200).json({ received: true }); // ACK other events, do nothing
+    return res.status(200).json({ received: true });
   }
 
   const session = event.data.object;
 
-  // Must be paid — could be 'unpaid' for certain session modes
   if (session.payment_status !== 'paid') {
     console.log('Webhook: session not paid, skipping:', session.id);
     return res.status(200).json({ received: true });
@@ -84,14 +80,11 @@ module.exports = async (req, res) => {
   const sessionId = session.id;
   const email     = session.customer_email || session.customer_details?.email || meta.buyer_email || '';
 
-  // Parse hold IDs — these are the ticket rows already in Supabase with status='held'
   const holdIds = meta.hold_ids
     ? meta.hold_ids.split(',').map(s => s.trim()).filter(Boolean)
     : [];
 
   if (!holdIds.length) {
-    // No hold IDs means this was created before the webhook upgrade.
-    // Log it and return — client-side handler is the only path for old sessions.
     console.warn('Webhook: no hold_ids in metadata for session', sessionId);
     return res.status(200).json({ received: true });
   }
@@ -102,9 +95,9 @@ module.exports = async (req, res) => {
     const db          = getSupabase();
     const txHash      = 'stripe:' + sessionId;
     const buyerId     = 'stripe-' + sessionId.slice(-8);
-    const buyerName   = meta.buyer_name   || '';
-    const buyerPhone  = meta.buyer_phone  || '';
-    const buyerZip    = meta.buyer_zip    || '';
+    const buyerName   = meta.buyer_name      || '';
+    const buyerPhone  = meta.buyer_phone     || '';
+    const buyerZip    = meta.buyer_zip       || '';
     const ageRange    = meta.buyer_age_range || '';
     const referral    = meta.buyer_referral  || '';
     const optInEmail  = meta.opt_in_email === 'true';
@@ -121,18 +114,14 @@ module.exports = async (req, res) => {
     const alreadyValid = existingTickets?.every(t => t.status === 'valid');
 
     if (alreadyValid) {
-      // Client-side return handler already completed. Nothing to do.
       console.log('Webhook: tickets already valid (client ran first) —', sessionId);
       return res.status(200).json({ received: true });
     }
 
     // ── 4. Update holds → valid ────────────────────────────────────────────────
-    // Generate TOTP seeds for any ticket that doesn't already have one.
-    // (Tickets created after the HTML upgrade will have seeds from hold time;
-    //  older holds won't — generate here as fallback.)
     for (const holdId of holdIds) {
-      const existing = existingTickets?.find(t => t.id === holdId);
-      const totpSeed = existing?.totp_seed || generateTotpSeed();
+      const existing  = existingTickets?.find(t => t.id === holdId);
+      const totpSeed  = existing?.totp_seed || generateTotpSeed();
 
       const { error: updateErr } = await db
         .from('tickets')
@@ -140,11 +129,11 @@ module.exports = async (req, res) => {
           status:      'valid',
           tx_hash:     txHash,
           buyer_id:    buyerId,
-          buyer_email: email   || null,
-          buyer_name:  buyerName || null,
+          buyer_email: email      || null,
+          buyer_name:  buyerName  || null,
           totp_seed:   totpSeed,
           payment,
-          wallet:      wallet || null,
+          wallet:      wallet     || null,
         })
         .eq('id', holdId);
 
@@ -162,14 +151,14 @@ module.exports = async (req, res) => {
         .maybeSingle();
 
       await db.from('buyers').upsert({
-        id:          buyerId,
+        id:           buyerId,
         email,
-        name:        buyerName  || null,
-        phone:       buyerPhone || null,
-        wallet:      wallet     || null,
-        zip:         buyerZip   || null,
-        age_range:   ageRange   || null,
-        referral:    referral   || null,
+        name:         buyerName  || null,
+        phone:        buyerPhone || null,
+        wallet:       wallet     || null,
+        zip:          buyerZip   || null,
+        age_range:    ageRange   || null,
+        referral:     referral   || null,
         opt_in_email: optInEmail,
         opt_in_sms:   optInSms,
         visit_count:  (existing?.visit_count || 0) + 1,
@@ -188,8 +177,8 @@ module.exports = async (req, res) => {
       await sendTicketEmail({
         tickets: ticketRows,
         email,
-        name:    buyerName || 'Guest',
-        phone:   buyerPhone || null,
+        name:      buyerName || 'Guest',
+        phone:     buyerPhone || null,
         txHash,
         sessionId,
       });
@@ -202,7 +191,6 @@ module.exports = async (req, res) => {
     console.error('Webhook processing error:', err);
     // Always return 200 to Stripe — returning 5xx causes Stripe to retry
     // indefinitely, which could cause duplicate writes on transient errors.
-    // Log the error and investigate via Stripe dashboard instead.
     return res.status(200).json({ received: true, warning: 'Processing error logged' });
   }
 };
@@ -228,7 +216,6 @@ async function sendTicketEmail({ tickets, email, name, txHash, sessionId }) {
     </tr>`
   ).join('');
 
-  // Build QR URLs for each ticket using TOTP seeds
   const qrBlocks = tickets.map(t => {
     const qrData = encodeURIComponent(JSON.stringify({ id: t.id, seed: t.totp_seed }));
     const qrUrl  = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${qrData}`;
