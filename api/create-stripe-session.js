@@ -1,18 +1,14 @@
 // api/create-stripe-session.js
 const Stripe = require('stripe');
-
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
-
   const stripeKey = process.env.STRIPE_SECRET_KEY_V2 || process.env.STRIPE_SECRET_KEY;
   if (!stripeKey) return res.status(500).json({ error: 'Stripe key not configured' });
-
   const stripe = Stripe(stripeKey);
-
   const {
     seats,
     eventName,
@@ -20,9 +16,8 @@ module.exports = async (req, res) => {
     buyerEmail,
     serviceFee,
     venueStripeAccountId,
-    // New fields for webhook
-    holdIds,       // array of hold ticket IDs already inserted to Supabase
-    eventId,       // event UUID
+    holdIds,
+    eventId,
     buyerName,
     buyerPhone,
     buyerZip,
@@ -33,9 +28,7 @@ module.exports = async (req, res) => {
     payment,
     wallet,
   } = req.body;
-
   if (!seats || !seats.length) return res.status(400).json({ error: 'No seats provided' });
-
   try {
     const lineItems = seats.map(seat => ({
       price_data: {
@@ -45,13 +38,8 @@ module.exports = async (req, res) => {
       },
       quantity: 1,
     }));
-
     const successUrl = `${venueUrl}/#stripe_success=true&session_id={CHECKOUT_SESSION_ID}`;
     const cancelUrl  = `${venueUrl}/#stripe_cancel=true`;
-
-    // Build metadata — Stripe allows up to 50 keys, values max 500 chars each.
-    // All buyer context goes here so the webhook can write tickets without any
-    // client-side involvement.
     const metadata = {
       event_id:        (eventId       || '').slice(0, 500),
       event_name:      (eventName     || '').slice(0, 500),
@@ -65,13 +53,9 @@ module.exports = async (req, res) => {
       payment:         (payment       || 'Card').slice(0, 500),
       wallet:          (wallet        || '').slice(0, 500),
       service_fee:     String(serviceFee || 0),
-      // hold_ids is a comma-separated list of ticket IDs already in Supabase.
-      // The webhook uses these to UPDATE holds → valid instead of inserting new rows.
       hold_ids:        (holdIds || []).join(',').slice(0, 500),
-      // seats_json gives the webhook all seat/tier/price info it needs.
       seats_json:      JSON.stringify(seats).slice(0, 500),
     };
-
     const sessionParams = {
       payment_method_types: ['card'],
       line_items: lineItems,
@@ -81,17 +65,22 @@ module.exports = async (req, res) => {
       customer_email: buyerEmail || undefined,
       metadata,
     };
-
     if (venueStripeAccountId) {
+      // 90/10 split on net after Stripe processing
+      // Gross = sum of (face value + service fee) per seat
+      // Net   = gross − (2.9% × gross + $0.30)
+      // Platform application fee = 10% of net (venue receives 90%)
+      const gross            = seats.reduce((s, seat) => s + seat.price + (serviceFee || 0), 0);
+      const stripeProcessing = gross * 0.029 + 0.30;
+      const net              = gross - stripeProcessing;
+      const applicationFee   = Math.max(0, Math.round(net * 0.10 * 100)); // in cents, floor at 0
       sessionParams.payment_intent_data = {
-        application_fee_amount: Math.round(seats.reduce((s, seat) => s + seat.price * 0.10, 0) * 100),
+        application_fee_amount: applicationFee,
         transfer_data: { destination: venueStripeAccountId },
       };
     }
-
     const session = await stripe.checkout.sessions.create(sessionParams);
     return res.status(200).json({ url: session.url });
-
   } catch (err) {
     console.error('Stripe session error:', err.message);
     return res.status(500).json({ error: err.message });
