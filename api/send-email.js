@@ -48,7 +48,7 @@ module.exports = async function handler(req, res) {
   const { error: dbError } = await db.from('claim_tokens').insert({
     token,
     ticket_id:  primaryId,
-    phone:      email,
+    phone:      req.body.phone || null,
     expires_at: expiresAt.toISOString(),
     claimed:    false,
   });
