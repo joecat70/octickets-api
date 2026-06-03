@@ -53,10 +53,18 @@ module.exports = async function handler(req, res) {
     const primaryId    = allTicketIds[0];
     const baseUrl      = (venueUrl || 'https://octicketslive.eth.limo').replace(/\/+$/, '');
 
+    // Create claim token
+    const token     = uuidv4();
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+
+    const db = createClient(
+      process.env.SUPABASE_URL,
+      process.env.SUPABASE_SERVICE_KEY
+    );
+
     // ── Authoritative event name lookup ───────────────────────────────
-    // If the client passed a raw event ID (evt_...) or nothing, look up
-    // the real event name from Supabase. ticket.event_name is written at
-    // purchase time and is always reliable regardless of EVENTS array state.
+    // db must be initialized before this runs. If the client passed a raw
+    // event ID (evt_...) or nothing, look up from Supabase directly.
     let resolvedEventName = eventName;
     if (!resolvedEventName || resolvedEventName.startsWith('evt_')) {
       try {
@@ -71,19 +79,13 @@ module.exports = async function handler(req, res) {
     }
     const finalEventName = resolvedEventName || 'Your Event';
 
-    // Create claim token
-    const token     = uuidv4();
-    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-
-    const db = createClient(
-      process.env.SUPABASE_URL,
-      process.env.SUPABASE_SERVICE_KEY
-    );
+    // phone is optional — claim_tokens.phone is NOT NULL so default to empty string
+    const claimPhone = req.body.phone || '';
 
     const { error: dbError } = await db.from('claim_tokens').insert({
       token,
       ticket_id:  primaryId,
-      phone:      req.body.phone || null,
+      phone:      claimPhone,
       expires_at: expiresAt.toISOString(),
       claimed:    false,
     });
