@@ -408,8 +408,8 @@ module.exports = async function handler(req, res) {
   // ============================================================
   if (action === 'confirm_exception_otp') {
     const { request_id, otp, recipient_phone, recipient_email, recipient_name, reason } = req.body;
-    if (!request_id || !otp)  return res.status(400).json({ error: 'request_id and otp required' });
-    if (!recipient_phone)     return res.status(400).json({ error: 'recipient_phone required' });
+    if (!request_id || !otp) return res.status(400).json({ error: 'request_id and otp required' });
+    // recipient_phone is collected in step 3 (excSubmitRequest) — not required at OTP confirmation
 
     try {
       const { data: excReq } = await supabase.from('exception_requests').select('*').eq('id', request_id).maybeSingle();
