@@ -255,9 +255,9 @@ module.exports = async function handler(req, res) {
       // Allow 'valid' and 'listed' — a listed ticket being re-priced is still eligible
       if (!['valid','listed'].includes(ticket.status)) return res.status(400).json({ error: 'Ticket not eligible for resale', status: ticket.status });
       const { data: config } = await supabase.from('event_config').select('resale_rule, transfer_enabled').eq('event_id', ticket.event_id).maybeSingle();
-      const resaleRule      = config?.resale_rule      ?? 'open';
-      const transferEnabled = config?.transfer_enabled  ?? true;
-      if (!transferEnabled) return res.status(400).json({ allowed: false, reason: 'Transfers are disabled for this event' });
+      // validate_price governs RESALE pricing only — transfer_enabled is not checked here.
+      // transfer_enabled only gates peer-to-peer gifts, not exchange listings.
+      const resaleRule = config?.resale_rule ?? 'open';
       if (resaleRule === 'original_plus_fees') {
         const originalPrice = parseFloat(ticket.price)      || 0;
         const stripeFee     = parseFloat(ticket.stripe_fee) || parseFloat(((originalPrice * 0.029) + 0.30).toFixed(2));
@@ -283,12 +283,20 @@ module.exports = async function handler(req, res) {
       const { data: config } = await supabase.from('event_config').select('transfer_enabled, resale_rule, price_cap_bps, doors_open').eq('event_id', ticket.event_id).maybeSingle();
       const transferEnabled = config?.transfer_enabled ?? true;
       const resaleRule      = config?.resale_rule      ?? 'open';
+      const originalPrice   = parseFloat(ticket.price)      || 0;
+      const stripeFee       = parseFloat(ticket.stripe_fee) || parseFloat(((originalPrice * 0.029) + 0.30).toFixed(2));
+      const maxPrice        = resaleRule === 'original_plus_fees' ? parseFloat((originalPrice + stripeFee).toFixed(2)) : null;
       if (!transferEnabled) {
-        return res.status(200).json({ eligible: false, transfer_enabled: false, reason: 'Transfers are disabled for this event. You may request an exception transfer through the platform.', exception_eligible: true });
+        // Transfer disabled — block peer-to-peer gift but still return max_price
+        // so the exchange listing modal can apply the price cap correctly.
+        return res.status(200).json({
+          eligible: false, transfer_enabled: false,
+          reason: 'Transfers are disabled for this event. You may request an exception transfer through the platform.',
+          exception_eligible: true,
+          resale_rule: resaleRule, max_price: maxPrice,
+          original_price: originalPrice, stripe_fee: stripeFee,
+        });
       }
-      const originalPrice = parseFloat(ticket.price)      || 0;
-      const stripeFee     = parseFloat(ticket.stripe_fee) || parseFloat(((originalPrice * 0.029) + 0.30).toFixed(2));
-      const maxPrice      = resaleRule === 'original_plus_fees' ? parseFloat((originalPrice + stripeFee).toFixed(2)) : null;
       return res.status(200).json({ eligible: true, transfer_enabled: true, resale_rule: resaleRule, max_price: maxPrice, original_price: originalPrice, stripe_fee: stripeFee });
     } catch (err) { return res.status(500).json({ error: 'Internal error', detail: err.message }); }
   }
