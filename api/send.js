@@ -53,6 +53,24 @@ module.exports = async function handler(req, res) {
     const primaryId    = allTicketIds[0];
     const baseUrl      = (venueUrl || 'https://octicketslive.eth.limo').replace(/\/+$/, '');
 
+    // ── Authoritative event name lookup ───────────────────────────────
+    // If the client passed a raw event ID (evt_...) or nothing, look up
+    // the real event name from Supabase. ticket.event_name is written at
+    // purchase time and is always reliable regardless of EVENTS array state.
+    let resolvedEventName = eventName;
+    if (!resolvedEventName || resolvedEventName.startsWith('evt_')) {
+      try {
+        const { data: ticketRow } = await db.from('tickets')
+          .select('event_name')
+          .eq('id', primaryId)
+          .maybeSingle();
+        if (ticketRow?.event_name) resolvedEventName = ticketRow.event_name;
+      } catch (lookupErr) {
+        console.warn('send/email: event name lookup failed:', lookupErr.message);
+      }
+    }
+    const finalEventName = resolvedEventName || 'Your Event';
+
     // Create claim token
     const token     = uuidv4();
     const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
@@ -119,7 +137,7 @@ module.exports = async function handler(req, res) {
         <table width="100%" cellpadding="0" cellspacing="0" style="background:#13110a;border:1px solid #2a2310;border-radius:6px;margin-bottom:24px">
           <tr><td style="padding:16px;border-bottom:1px solid #1e1c14">
             <div style="font-size:10px;color:#8a7f5c;letter-spacing:1.5px;text-transform:uppercase;font-family:monospace;margin-bottom:6px">Event</div>
-            <div style="font-size:18px;font-weight:700;color:#f5f0e6;font-family:Georgia,serif">${eventName || 'Your Event'}</div>
+            <div style="font-size:18px;font-weight:700;color:#f5f0e6;font-family:Georgia,serif">${finalEventName}</div>
           </td></tr>
           <tr><td style="padding:16px">
             <div style="font-size:10px;color:#8a7f5c;letter-spacing:1.5px;text-transform:uppercase;font-family:monospace;margin-bottom:8px">
@@ -177,7 +195,7 @@ module.exports = async function handler(req, res) {
       const { error: emailError } = await resend.emails.send({
         from:    'OC Tickets Live <tickets@octicketslive.com>',
         to:      email,
-        subject: `Your Ticket${totalCount > 1 ? `s (${totalCount})` : ''} — ${eventName || 'OC Tickets Live'}`,
+        subject: `Your Ticket${totalCount > 1 ? `s (${totalCount})` : ''} — ${finalEventName}`,
         html,
       });
       if (emailError) {
