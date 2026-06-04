@@ -433,7 +433,7 @@ module.exports = async function handler(req, res) {
       // Store rolling count on record for use in Step 3 dual-write
       await supabase.from('exception_requests').update({
         approval_tier: excReq.approval_tier,
-      }).eq('id', request_id).catch(() => {});
+      }).eq('id', request_id).then(() => {}, () => {});
 
       return res.status(200).json({
         submitted: true, request_id, approval_tier: excReq.approval_tier,
@@ -463,7 +463,7 @@ module.exports = async function handler(req, res) {
 
       const now = new Date().toISOString();
       await supabase.from('exception_requests').update({ status: 'approved', delivery_status: 'none', reviewed_at: now, reviewer_notes: reviewer_notes || null, updated_at: now }).eq('id', request_id);
-      await supabase.from('platform_exception_requests').update({ status: 'approved', reviewed_at: now, reviewer_notes: reviewer_notes || null, updated_at: now }).eq('id', 'plat-' + request_id).catch(e => console.error('Platform approve sync error:', e.message));
+      await supabase.from('platform_exception_requests').update({ status: 'approved', reviewed_at: now, reviewer_notes: reviewer_notes || null, updated_at: now }).eq('id', 'plat-' + request_id).then(() => {}, e => console.error('Platform approve sync error:', e.message));
 
       // Load ticket info for notification
       const { data: ticket } = await supabase.from('tickets').select('seat, event_name').eq('id', excReq.ticket_id).maybeSingle();
@@ -508,7 +508,7 @@ module.exports = async function handler(req, res) {
 
       const now = new Date().toISOString();
       await supabase.from('exception_requests').update({ status: 'denied', reviewed_at: now, reviewer_notes: reviewer_notes || null, updated_at: now }).eq('id', request_id);
-      await supabase.from('platform_exception_requests').update({ status: 'denied', reviewed_at: now, reviewer_notes: reviewer_notes || null, updated_at: now }).eq('id', 'plat-' + request_id).catch(e => console.error('Platform deny sync error:', e.message));
+      await supabase.from('platform_exception_requests').update({ status: 'denied', reviewed_at: now, reviewer_notes: reviewer_notes || null, updated_at: now }).eq('id', 'plat-' + request_id).then(() => {}, e => console.error('Platform deny sync error:', e.message));
 
       // Load ticket info
       const { data: ticket } = await supabase.from('tickets').select('seat, event_name').eq('id', excReq.ticket_id).maybeSingle();
@@ -562,7 +562,7 @@ module.exports = async function handler(req, res) {
 
           // Mark pending_exception_delivery
           await supabase.from('exception_requests').update({ delivery_status: 'pending_exception_delivery', updated_at: now.toISOString() }).eq('id', excReq.id);
-          await supabase.from('platform_exception_requests').update({ delivery_status: 'pending_exception_delivery', updated_at: now.toISOString() }).eq('id', 'plat-' + excReq.id).catch(() => {});
+          await supabase.from('platform_exception_requests').update({ delivery_status: 'pending_exception_delivery', updated_at: now.toISOString() }).eq('id', 'plat-' + excReq.id).then(() => {}, () => {});
 
           // Execute ticket ownership transfer
           await supabase.from('tickets').update({
@@ -581,7 +581,7 @@ module.exports = async function handler(req, res) {
             token, ticket_id: excReq.ticket_id,
             phone: excReq.recipient_phone || null,
             expires_at: expiresAt, claimed: false,
-          }).catch(e => console.error('Claim token error:', e.message));
+          }).then(() => {}, e => console.error('Claim token error:', e.message));
           const claimUrl = `${baseUrl}/#claim=${token}`;
 
           // Load ticket info for notifications
@@ -591,7 +591,7 @@ module.exports = async function handler(req, res) {
 
           // Mark delivered
           await supabase.from('exception_requests').update({ delivery_status: 'delivered', updated_at: now.toISOString() }).eq('id', excReq.id);
-          await supabase.from('platform_exception_requests').update({ delivery_status: 'delivered', updated_at: now.toISOString() }).eq('id', 'plat-' + excReq.id).catch(() => {});
+          await supabase.from('platform_exception_requests').update({ delivery_status: 'delivered', updated_at: now.toISOString() }).eq('id', 'plat-' + excReq.id).then(() => {}, () => {});
 
           // Notification 4a — ticket delivered to recipient
           if (excReq.recipient_email) {
@@ -678,7 +678,7 @@ module.exports = async function handler(req, res) {
         prior_exception_count: rollingCount,
         repeat_resale_flag:    repeatResale,
         approval_tier:         excReq.approval_tier,
-      }).catch(e => console.error('Platform dual write error:', e.message));
+      }).then(() => {}, e => console.error('Platform dual write error:', e.message));
 
       // Load ticket info for Notification 1
       const { data: ticket } = await supabase.from('tickets').select('seat, event_name').eq('id', excReq.ticket_id).maybeSingle();
