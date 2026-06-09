@@ -7,9 +7,6 @@
 //   'email'  → ticket confirmation email + claim token (was send-email.js)
 //   'sms'    → ticket SMS + claim token      (was send-sms.js)
 //   'verify' → listing/gift verification code email (was send-verify.js)
-//
-// All existing request bodies and response shapes are preserved exactly.
-// HTML calls updated to /api/send with type field added to body.
 // ============================================================
 
 const { Resend }       = require('resend');
@@ -33,8 +30,6 @@ module.exports = async function handler(req, res) {
 
   // ============================================================
   // TYPE: email
-  // Ticket confirmation email + claim token in Supabase.
-  // Preserves full send-email.js behavior exactly.
   // ============================================================
   if (type === 'email') {
     const {
@@ -53,7 +48,6 @@ module.exports = async function handler(req, res) {
     const primaryId    = allTicketIds[0];
     const baseUrl      = (venueUrl || 'https://octicketslive.eth.limo').replace(/\/+$/, '');
 
-    // Create claim token
     const token     = uuidv4();
     const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
 
@@ -62,9 +56,7 @@ module.exports = async function handler(req, res) {
       process.env.SUPABASE_SERVICE_KEY
     );
 
-    // ── Authoritative event name lookup ───────────────────────────────
-    // db must be initialized before this runs. If the client passed a raw
-    // event ID (evt_...) or nothing, look up from Supabase directly.
+    // Authoritative event name lookup
     let resolvedEventName = eventName;
     if (!resolvedEventName || resolvedEventName.startsWith('evt_')) {
       try {
@@ -78,11 +70,10 @@ module.exports = async function handler(req, res) {
       }
     }
     const finalEventName = resolvedEventName || 'Your Event';
-
-    // phone is optional — claim_tokens.phone is NOT NULL so default to empty string
     const claimPhone = req.body.phone || '';
 
     const { error: dbError } = await db.from('claim_tokens').insert({
+      id:         uuidv4(),
       token,
       ticket_id:  primaryId,
       phone:      claimPhone,
@@ -214,10 +205,14 @@ module.exports = async function handler(req, res) {
 
   // ============================================================
   // TYPE: sms
-  // Ticket SMS with claim token. Preserves send-sms.js exactly.
-  // Note: uses SUPABASE_SECRET_KEY (matches original send-sms.js)
   // ============================================================
   if (type === 'sms') {
+    const SMS_ENABLED = process.env.SMS_ENABLED === 'true';
+    if (!SMS_ENABLED) {
+      console.log('send/sms: SMS_ENABLED is false — skipping');
+      return res.status(200).json({ success: true, skipped: true });
+    }
+
     const { phone, ticketId, eventName, seat, venueUrl } = req.body;
     if (!phone || !ticketId) return res.status(400).json({ error: 'Missing phone or ticketId' });
 
@@ -227,12 +222,16 @@ module.exports = async function handler(req, res) {
 
       const db = createClient(
         process.env.SUPABASE_URL,
-        process.env.SUPABASE_SECRET_KEY  // preserved from original send-sms.js
+        process.env.SUPABASE_SERVICE_KEY
       );
 
       const { error: dbError } = await db.from('claim_tokens').insert({
-        token, ticket_id: ticketId, phone,
-        expires_at: expiresAt.toISOString(), claimed: false,
+        id:         uuidv4(),
+        token,
+        ticket_id:  ticketId,
+        phone,
+        expires_at: expiresAt.toISOString(),
+        claimed:    false,
       });
       if (dbError) return res.status(500).json({ error: 'Failed to save token' });
 
@@ -255,15 +254,13 @@ module.exports = async function handler(req, res) {
 
   // ============================================================
   // TYPE: verify
-  // 6-digit verification code email for listing/gift confirmation.
-  // Preserves send-verify.js exactly.
   // ============================================================
   if (type === 'verify') {
     const { email, code, eventName, seats } = req.body;
     if (!email || !code) return res.status(400).json({ error: 'email and code are required' });
 
-    const resend    = new Resend(process.env.RESEND_API_KEY);
-    const seatList  = Array.isArray(seats) ? seats.join(', ') : (seats || 'Reserved Seat');
+    const resend   = new Resend(process.env.RESEND_API_KEY);
+    const seatList = Array.isArray(seats) ? seats.join(', ') : (seats || 'Reserved Seat');
 
     try {
       const { error } = await resend.emails.send({
@@ -286,7 +283,7 @@ module.exports = async function handler(req, res) {
               ${code}
             </div>
             <p style="font-size:12px;color:#999;margin:0">
-              This code expires in 10 minutes. If you did not request this, you can ignore this email — your tickets remain safe.
+              This code expires in 10 minutes. If you did not request this, you can ignore this email.
             </p>
           </div>
         `,
@@ -305,6 +302,5 @@ module.exports = async function handler(req, res) {
     }
   }
 
-  // Unknown type
   return res.status(400).json({ error: `Unknown type: ${type}. Must be email | sms | verify` });
 };
