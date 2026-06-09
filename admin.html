@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- Octix Admin · v1.2.3 · Local use only (Option C) · Two-panel login: Admin (Supabase Auth) + Door Scanner (PIN) -->
+<!-- Octix Admin · v1.2.2 · Local use only (Option C) · Two-panel login: Admin (Supabase Auth) + Door Scanner (PIN) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -362,7 +362,7 @@
 
     </div><!-- /login-panels -->
 
-    <div class="login-footer">LOCAL USE ONLY · NOT PUBLISHED TO ANY SERVER</div>
+    <div class="login-footer">OCTIX ADMIN · OC TICKETS LIVE</div>
   </div>
 </div>
 
@@ -463,14 +463,6 @@
           <div class="span2">
             <label class="form-label">Event Name *</label>
             <input class="form-input" type="text" id="ae-name" placeholder="e.g. Spring Bowling Tournament 2026">
-          </div>
-          <div>
-            <label class="form-label">Venue / House Name</label>
-            <input class="form-input" type="text" id="ae-venue-name" placeholder="e.g. Coral Springs Bowling Center">
-          </div>
-          <div>
-            <label class="form-label">Venue Address</label>
-            <input class="form-input" type="text" id="ae-venue-address" placeholder="e.g. 8325 NW 15 Ct, Coral Springs, FL">
           </div>
           <div class="span2">
             <label class="form-label">Max Entrants *</label>
@@ -582,17 +574,7 @@
       <div class="card-title-lg" style="margin-bottom:1rem">Database Connection</div>
       <div class="card">
         <div class="card-title">Supabase Config</div>
-        <div class="info-gold" style="margin-bottom:1rem">Credentials are stored in your browser's localStorage — they never leave this device.</div>
-        <div class="form-grid">
-          <div class="span2">
-            <label class="form-label">Supabase Project URL</label>
-            <input class="form-input" type="text" id="cfg-url" placeholder="https://xxxxxxxxxxx.supabase.co">
-          </div>
-          <div class="span2">
-            <label class="form-label">Anon (Public) Key</label>
-            <input class="form-input" type="text" id="cfg-key" placeholder="eyJhbGci…">
-          </div>
-        </div>
+
         <div class="card-title" style="margin-top:1.25rem">Door Scanner PIN</div>
         <div style="font-size:12px;color:var(--txt3);margin-bottom:.75rem">Change the PIN door staff use to access the scanner.</div>
         <div class="form-grid">
@@ -638,8 +620,6 @@
         <button class="btn btn-danger btn-sm" onclick="clearAll()">Clear All Local Data</button>
       </div>
     </div>
-  </div>
-</div>
 
     <!-- ── BRACKETS TAB ── -->
     <div id="tab-brackets" class="tab-panel">
@@ -656,7 +636,7 @@
         </div>
       </div>
 
-      <div id="bkt-no-event" class="empty" style="display:block">Select an event above to manage brackets.</div>
+      <div id="bkt-no-event" style="display:block;font-size:11px;color:var(--txt3);font-family:var(--fm);padding:.5rem 0">Select an event above to manage brackets.</div>
       <div id="bkt-content" style="display:none">
 
         <!-- ── 3b DRAW SECTION ── -->
@@ -701,6 +681,7 @@
       </div><!-- /bkt-content -->
     </div><!-- /tab-brackets -->
   </div><!-- /content -->
+</div><!-- /admin-screen -->
 
 <!-- ══ DELETE DIALOG ══ -->
 <div class="overlay" id="overlay-delete">
@@ -725,8 +706,6 @@
     <input type="hidden" id="edit-id">
     <div class="form-grid">
       <div class="span2"><label class="form-label">Event Name *</label><input class="form-input" type="text" id="edit-name"></div>
-      <div><label class="form-label">Venue / House Name</label><input class="form-input" type="text" id="edit-venue-name" placeholder="e.g. Coral Springs Bowling Center"></div>
-      <div><label class="form-label">Venue Address</label><input class="form-input" type="text" id="edit-venue-address" placeholder="e.g. 8325 NW 15 Ct, Coral Springs, FL"></div>
       <div><label class="form-label">Date *</label><input class="form-input" type="date" id="edit-date"></div>
       <div><label class="form-label">Max Entrants *</label><input class="form-input" type="number" id="edit-max" min="1"></div>
       <div><label class="form-label">Doors Open</label><input class="form-input" type="time" id="edit-doors"></div>
@@ -767,18 +746,12 @@ function getDoorPin() { return localStorage.getItem(PIN_KEY) || DEFAULT_DOOR_PIN
 
 function loadConfig() {
   const cfg = getConfig();
-  document.getElementById('cfg-url').value = cfg.url || DEFAULT_SB_URL;
-  document.getElementById('cfg-key').value = cfg.key || DEFAULT_SB_KEY;
   if (!cfg.url) localStorage.setItem(CFG_KEY, JSON.stringify({ url: DEFAULT_SB_URL, key: DEFAULT_SB_KEY }));
 }
 
 function saveConfig() {
-  const url     = document.getElementById('cfg-url').value.trim();
-  const key     = document.getElementById('cfg-key').value.trim();
   const pinCur  = document.getElementById('cfg-pin-current').value;
   const pinNew  = document.getElementById('cfg-pin-new').value;
-  if (!url || !key) { showCfgMsg('URL and key are required.', 'err'); return; }
-  localStorage.setItem(CFG_KEY, JSON.stringify({ url, key }));
   // PIN change
   if (pinNew) {
     if (pinCur !== getDoorPin()) { showCfgMsg('Current PIN is incorrect.', 'err'); return; }
@@ -1120,7 +1093,7 @@ function renderEventsList() {
         </div>
         <div class="ev-meta">
           ${dateStr} · Doors ${fmtTime(ev.doors_open)} · Start ${fmtTime(ev.show_time)}<br>
-          ${ev.venue_name ? esc(ev.venue_name) + (ev.venue_address ? ' · ' + esc(ev.venue_address) : '') + '<br>' : ''}Reg $${ev.tier1_price} + $${ev.tier1_fee} fee · Bracket $${ev.tier2_price} · Max ${ev.max_entrants||'—'}<br>
+          Reg $${ev.tier1_price} + $${ev.tier1_fee} fee · Bracket $${ev.tier2_price} · Max ${ev.max_entrants||'—'}<br>
           <span style="color:var(--txt3);font-size:9px">${ev.id}</span>
         </div>
       </div>
@@ -1162,7 +1135,7 @@ async function saveEvent() {
   const saleStart = saleDateV ? (saleDateV+'T'+(saleTimeV||'00:00')+':00') : null;
   const status = !saleStart ? 'on_sale' : (new Date(saleStart) > new Date() ? 'presale' : 'on_sale');
   const id = 'evt_' + crypto.randomUUID().replace(/-/g,'').slice(0,16);
-  const row = { id, name, date:dateV, doors_open:document.getElementById('ae-doors').value||'19:00', show_time:document.getElementById('ae-show').value||'20:00', age_restriction:document.getElementById('ae-age').value, description:document.getElementById('ae-desc').value.trim()||null, tags:document.getElementById('ae-tags').value.trim()||null, venue_name:document.getElementById('ae-venue-name').value.trim()||null, venue_address:document.getElementById('ae-venue-address').value.trim()||null, max_entrants:maxEnt, tier1_price:t1p, tier1_fee:t1f, tier2_price:t2p, sale_start:saleStart, status, hdcp_base_m:parseFloat(document.getElementById('ae-hdcp-base-m').value)||220, hdcp_base_f:parseFloat(document.getElementById('ae-hdcp-base-f').value)||200, hdcp_pct:parseFloat(document.getElementById('ae-hdcp-pct').value)||90, bracket_types:document.getElementById('ae-bracket-types').value||'both' };
+  const row = { id, name, date:dateV, doors_open:document.getElementById('ae-doors').value||'19:00', show_time:document.getElementById('ae-show').value||'20:00', age_restriction:document.getElementById('ae-age').value, description:document.getElementById('ae-desc').value.trim()||null, tags:document.getElementById('ae-tags').value.trim()||null, max_entrants:maxEnt, tier1_price:t1p, tier1_fee:t1f, tier2_price:t2p, sale_start:saleStart, status, hdcp_base_m:parseFloat(document.getElementById('ae-hdcp-base-m').value)||220, hdcp_base_f:parseFloat(document.getElementById('ae-hdcp-base-f').value)||200, hdcp_pct:parseFloat(document.getElementById('ae-hdcp-pct').value)||90, bracket_types:document.getElementById('ae-bracket-types').value||'both' };
   try {
     const { error } = await db.from('octix_events').insert(row);
     if (error) throw error;
@@ -1178,7 +1151,7 @@ async function saveEvent() {
 }
 
 function resetForm() {
-  ['ae-name','ae-desc','ae-tags','ae-sale-date','ae-sale-time','ae-venue-name','ae-venue-address'].forEach(id => { const el=document.getElementById(id); if(el) el.value=''; });
+  ['ae-name','ae-desc','ae-tags','ae-sale-date','ae-sale-time'].forEach(id => { const el=document.getElementById(id); if(el) el.value=''; });
   document.getElementById('ae-date').value='';
   document.getElementById('ae-max').value='';
   document.getElementById('ae-doors').value='19:00';
@@ -1236,8 +1209,6 @@ function openEdit(id) {
   document.getElementById('edit-hdcp-base-m').value     = ev.hdcp_base_m??220;
   document.getElementById('edit-hdcp-base-f').value     = ev.hdcp_base_f??200;
   document.getElementById('edit-hdcp-pct').value        = ev.hdcp_pct??90;
-  document.getElementById('edit-venue-name').value      = ev.venue_name||'';
-  document.getElementById('edit-venue-address').value   = ev.venue_address||'';
   document.getElementById('edit-desc').value            = ev.description||'';
   document.getElementById('edit-tags').value            = ev.tags||'';
   document.getElementById('edit-err').style.display = 'none';
@@ -1251,7 +1222,7 @@ async function saveEdit() {
   const date = document.getElementById('edit-date').value;
   const maxEnt = parseInt(document.getElementById('edit-max').value);
   if (!name || !date || !(maxEnt > 0)) { errEl.textContent='Name, date, and max entrants required.'; errEl.style.display='block'; return; }
-  const updates = { name, date, max_entrants:maxEnt, doors_open:document.getElementById('edit-doors').value, show_time:document.getElementById('edit-show').value, age_restriction:document.getElementById('edit-age').value, tier1_price:parseFloat(document.getElementById('edit-t1-price').value), tier1_fee:parseFloat(document.getElementById('edit-t1-fee').value)||0, tier2_price:parseFloat(document.getElementById('edit-t2-price').value), status:document.getElementById('edit-status').value, bracket_types:document.getElementById('edit-bracket-types').value||'both', hdcp_base_m:parseFloat(document.getElementById('edit-hdcp-base-m').value)||220, hdcp_base_f:parseFloat(document.getElementById('edit-hdcp-base-f').value)||200, hdcp_pct:parseFloat(document.getElementById('edit-hdcp-pct').value)||90, venue_name:document.getElementById('edit-venue-name').value.trim()||null, venue_address:document.getElementById('edit-venue-address').value.trim()||null, description:document.getElementById('edit-desc').value.trim()||null, tags:document.getElementById('edit-tags').value.trim()||null };
+  const updates = { name, date, max_entrants:maxEnt, doors_open:document.getElementById('edit-doors').value, show_time:document.getElementById('edit-show').value, age_restriction:document.getElementById('edit-age').value, tier1_price:parseFloat(document.getElementById('edit-t1-price').value), tier1_fee:parseFloat(document.getElementById('edit-t1-fee').value)||0, tier2_price:parseFloat(document.getElementById('edit-t2-price').value), status:document.getElementById('edit-status').value, bracket_types:document.getElementById('edit-bracket-types').value||'both', hdcp_base_m:parseFloat(document.getElementById('edit-hdcp-base-m').value)||220, hdcp_base_f:parseFloat(document.getElementById('edit-hdcp-base-f').value)||200, hdcp_pct:parseFloat(document.getElementById('edit-hdcp-pct').value)||90, description:document.getElementById('edit-desc').value.trim()||null, tags:document.getElementById('edit-tags').value.trim()||null };
   try {
     const { error } = await db.from('octix_events').update(updates).eq('id', id);
     if (error) throw error;
