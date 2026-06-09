@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- Octix Admin · v1.2.7 · Local use only (Option C) · Two-panel login: Admin (Supabase Auth) + Door Scanner (PIN) -->
+<!-- Octix Admin · v1.2.8 · Local use only (Option C) · Two-panel login: Admin (Supabase Auth) + Door Scanner (PIN) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -789,7 +789,7 @@
 // ══════════════════════════════════════════════════════
 const DEFAULT_SB_URL  = 'https://aalnexhavornoweeghhe.supabase.co';
 const DEFAULT_SB_KEY  = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFhbG5leGhhdm9ybm93ZWVnaGhlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA5MzA1OTgsImV4cCI6MjA5NjUwNjU5OH0.ZWTChrZKjGN-MAraXBI7PDb58gvsmIJEwXcClAVB1Kg';
-const DEFAULT_DOOR_PIN = 'DoorABC1'; // matches octix_v5.x default — change in Settings before go-live
+const DEFAULT_DOOR_PIN = '12301230'; // matches octix_v5.x default — change in Settings before go-live
 const CFG_KEY = 'octix_admin_cfg_v1';
 const PIN_KEY = 'octix_door_pin_v1';
 
@@ -832,19 +832,6 @@ function clearAll() {
 // ══════════════════════════════════════════════════════
 // SUPABASE
 // ══════════════════════════════════════════════════════
-// Original Supabase DB — tickets, buyers, transactions
-const TICKETS_SB_URL = 'https://uruepqyiupmmvwmvjrie.supabase.co';
-const TICKETS_SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVydWVwcXlpdXBtbXZ3bXZqcmllIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY3MDU0OTUsImV4cCI6MjA5MjI4MTQ5NX0.JrQXEVLQmFk4AZl1_ICal16dlHMWBWHLO13gie92TeY';
-
-let _sbTickets = null;
-function getTicketsDB() {
-  if (_sbTickets) return _sbTickets;
-  try {
-    _sbTickets = supabase.createClient(TICKETS_SB_URL, TICKETS_SB_KEY);
-    return _sbTickets;
-  } catch(e) { console.error('Tickets DB init failed:', e); return null; }
-}
-
 let _sb = null;
 function initDB() {
   const cfg = getConfig();
@@ -982,7 +969,7 @@ let scanStream = null, scanAnimFrame = null;
 let scanCount = 0, scanLog = [];
 
 async function loadScanCounts() {
-  const db = getTicketsDB();
+  const db = getDB();
   if (!db) return;
   try {
     const { data } = await db.from('tickets').select('id,status').eq('status','scanned');
@@ -1776,7 +1763,7 @@ async function markPaid(poolId) {
 let _rosterData = [];
 
 async function loadRosterData() {
-  const db = getTicketsDB();
+  const db = getDB();
   const tbody = document.getElementById('roster-tbody');
 
   // Populate event filter
