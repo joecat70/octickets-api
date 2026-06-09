@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- Octix Admin · v1.2.2 · Local use only (Option C) · Two-panel login: Admin (Supabase Auth) + Door Scanner (PIN) -->
+<!-- Octix Admin · v1.2.7 · Local use only (Option C) · Two-panel login: Admin (Supabase Auth) + Door Scanner (PIN) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -7,6 +7,7 @@
 <title>Octix Admin</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap');
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -434,6 +435,7 @@
       <button class="tab-btn" onclick="showTab('add')">Add Event</button>
       <button class="tab-btn" onclick="showTab('settings')">Settings</button>
       <button class="tab-btn" onclick="showTab('brackets')">Brackets</button>
+      <button class="tab-btn" onclick="showTab('roster')">Roster</button>
     </div>
 
     <!-- ── EVENTS TAB ── -->
@@ -680,6 +682,56 @@
 
       </div><!-- /bkt-content -->
     </div><!-- /tab-brackets -->
+  <!-- ── ROSTER TAB ── -->
+    <div id="tab-roster" class="tab-panel">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:1rem;flex-wrap:wrap;gap:.75rem">
+        <div>
+          <div class="card-title-lg">Registrant Roster</div>
+          <div style="font-size:12px;color:var(--txt3);margin-top:2px">Sorted by last name · Includes check-in status</div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <select id="roster-event-filter" class="form-input" style="font-size:12px;padding:6px 10px;min-width:200px" onchange="loadRosterData()">
+            <option value="">— All Events —</option>
+          </select>
+          <button class="btn btn-ghost btn-sm" onclick="loadRosterData()">↻ Refresh</button>
+        </div>
+      </div>
+
+      <!-- Export buttons -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:1rem">
+        <div style="background:var(--bg2);border:1px solid var(--border);border-radius:6px;padding:1rem">
+          <div style="font-size:12px;font-weight:700;color:var(--ok);margin-bottom:4px">🎳 Day-of Roster</div>
+          <div style="font-size:10px;color:var(--txt3);font-family:var(--fm);margin-bottom:.75rem;line-height:1.5">Lane assignments, USBC #, averages, check-in status. Print and bring to the lanes.</div>
+          <button class="btn btn-ok btn-sm" onclick="exportDayOfRoster()" style="width:100%;font-size:11px">⬇ Export Day-of Roster</button>
+        </div>
+        <div style="background:var(--bg2);border:1px solid var(--border);border-radius:6px;padding:1rem">
+          <div style="font-size:12px;font-weight:700;color:var(--blue);margin-bottom:4px">📊 Full Registration Export</div>
+          <div style="font-size:10px;color:var(--txt3);font-family:var(--fm);margin-bottom:.75rem;line-height:1.5">All fields including contact info, guardians, payment, and check-in time.</div>
+          <button class="btn btn-sm" onclick="exportFullRegistration()" style="width:100%;font-size:11px;background:var(--blue);color:#fff;border-color:var(--blue)">⬇ Full Export</button>
+        </div>
+      </div>
+
+      <!-- Roster table -->
+      <div style="overflow-x:auto;border:1px solid var(--border);border-radius:6px">
+        <table style="width:100%;border-collapse:collapse;font-size:11px">
+          <thead><tr style="background:var(--bg3)">
+            <th style="text-align:left;padding:.5rem .75rem;color:var(--txt3);font-weight:600;font-family:var(--fm);font-size:10px;white-space:nowrap">LAST NAME</th>
+            <th style="text-align:left;padding:.5rem .75rem;color:var(--txt3);font-weight:600;font-family:var(--fm);font-size:10px;white-space:nowrap">FIRST NAME</th>
+            <th style="text-align:left;padding:.5rem .75rem;color:var(--txt3);font-weight:600;font-family:var(--fm);font-size:10px;white-space:nowrap">USBC #</th>
+            <th style="text-align:right;padding:.5rem .75rem;color:var(--txt3);font-weight:600;font-family:var(--fm);font-size:10px">AVG</th>
+            <th style="text-align:left;padding:.5rem .75rem;color:var(--txt3);font-weight:600;font-family:var(--fm);font-size:10px">AGE</th>
+            <th style="text-align:left;padding:.5rem .75rem;color:var(--txt3);font-weight:600;font-family:var(--fm);font-size:10px">GENDER</th>
+            <th style="text-align:right;padding:.5rem .75rem;color:var(--txt3);font-weight:600;font-family:var(--fm);font-size:10px">BRACKETS</th>
+            <th style="text-align:left;padding:.5rem .75rem;color:var(--txt3);font-weight:600;font-family:var(--fm);font-size:10px;white-space:nowrap">CHECK-IN</th>
+            <th style="text-align:left;padding:.5rem .75rem;color:var(--txt3);font-weight:600;font-family:var(--fm);font-size:10px">LANE</th>
+          </tr></thead>
+          <tbody id="roster-tbody">
+            <tr><td colspan="9" style="padding:2rem;text-align:center;color:var(--txt3);font-family:var(--fm)">Select an event and click ↻ Refresh to load roster.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
   </div><!-- /content -->
 </div><!-- /admin-screen -->
 
@@ -780,6 +832,19 @@ function clearAll() {
 // ══════════════════════════════════════════════════════
 // SUPABASE
 // ══════════════════════════════════════════════════════
+// Original Supabase DB — tickets, buyers, transactions
+const TICKETS_SB_URL = 'https://uruepqyiupmmvwmvjrie.supabase.co';
+const TICKETS_SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVydWVwcXlpdXBtbXZ3bXZqcmllIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY3MDU0OTUsImV4cCI6MjA5MjI4MTQ5NX0.JrQXEVLQmFk4AZl1_ICal16dlHMWBWHLO13gie92TeY';
+
+let _sbTickets = null;
+function getTicketsDB() {
+  if (_sbTickets) return _sbTickets;
+  try {
+    _sbTickets = supabase.createClient(TICKETS_SB_URL, TICKETS_SB_KEY);
+    return _sbTickets;
+  } catch(e) { console.error('Tickets DB init failed:', e); return null; }
+}
+
 let _sb = null;
 function initDB() {
   const cfg = getConfig();
@@ -917,7 +982,7 @@ let scanStream = null, scanAnimFrame = null;
 let scanCount = 0, scanLog = [];
 
 async function loadScanCounts() {
-  const db = getDB();
+  const db = getTicketsDB();
   if (!db) return;
   try {
     const { data } = await db.from('tickets').select('id,status').eq('status','scanned');
@@ -1048,6 +1113,7 @@ function showTab(id) {
   });
   if (id === 'events') loadEvents();
   if (id === 'brackets') { populateBktEventSelect(); }
+  if (id === 'roster') { loadRosterData(); }
 }
 
 // ══════════════════════════════════════════════════════
@@ -1702,6 +1768,197 @@ async function markPaid(poolId) {
   const pool = Object.values(_bktPools).find(p => p.id === poolId);
   if (pool) pool.status = 'complete';
   renderPayoutsSection();
+}
+
+// ══════════════════════════════════════════════════════
+// ROSTER
+// ══════════════════════════════════════════════════════
+let _rosterData = [];
+
+async function loadRosterData() {
+  const db = getTicketsDB();
+  const tbody = document.getElementById('roster-tbody');
+
+  // Populate event filter
+  const evFilter = document.getElementById('roster-event-filter');
+  if(evFilter && evFilter.options.length <= 1) {
+    _events.forEach(ev => {
+      const o = document.createElement('option');
+      o.value = ev.id; o.textContent = ev.name + ' · ' + (ev.date||'');
+      evFilter.appendChild(o);
+    });
+  }
+
+  if(tbody) tbody.innerHTML = '<tr><td colspan="9" style="padding:2rem;text-align:center;color:var(--txt3);font-family:var(--fm)"><span class="spinner"></span><br><br>Loading…</td></tr>';
+  if(!db) {
+    if(tbody) tbody.innerHTML = '<tr><td colspan="9" style="padding:2rem;text-align:center;color:var(--red);font-family:var(--fm)">Database not connected.</td></tr>';
+    return;
+  }
+
+  try {
+    const filter = document.getElementById('roster-event-filter')?.value || '';
+    let ticketQuery = db.from('tickets')
+      .select('id, buyer_id, buyer_email, buyer_name, event_id, event_name, seat_key, payment, purchased_at, status, scanned_at')
+      .neq('status','refunded').neq('status','cancelled').neq('status','transferred');
+    if(filter) ticketQuery = ticketQuery.eq('event_id', filter);
+    const { data: tickets, error } = await ticketQuery;
+    if(error) throw error;
+
+    // Fetch buyer profiles
+    const buyerIds = [...new Set((tickets||[]).map(t=>t.buyer_id).filter(Boolean))];
+    let buyerMap = {};
+    if(buyerIds.length) {
+      const { data: buyers } = await db.from('buyers')
+        .select('id, email, first_name, last_name, gender, age_label, usbc, avg, address, city, state, zip_code, phone, guardian_name, guardian_phone, opt_in_email, opt_in_sms')
+        .in('id', buyerIds);
+      (buyers||[]).forEach(b => { buyerMap[b.id] = b; });
+    }
+
+    // Deduplicate — one record per registrant per event
+    const regMap = {};
+    (tickets||[]).forEach(t => {
+      const key   = (t.buyer_id||t.buyer_email) + '|' + t.event_id;
+      const isReg = (t.seat_key||'').includes('REG-FEE');
+      const isBkt = (t.seat_key||'').startsWith('BRACKET');
+      const bp    = buyerMap[t.buyer_id] || {};
+      if(!regMap[key]) regMap[key] = { ...t, buyer: bp, bracketCount: 0 };
+      if(isReg) regMap[key] = { ...regMap[key], ...t, buyer: bp, bracketCount: regMap[key].bracketCount };
+      if(isBkt) regMap[key].bracketCount++;
+      // Capture earliest scanned_at across all tickets for this registrant
+      if(t.scanned_at) {
+        if(!regMap[key].scanned_at || t.scanned_at < regMap[key].scanned_at) {
+          regMap[key].scanned_at = t.scanned_at;
+        }
+      }
+    });
+
+    _rosterData = Object.values(regMap).sort((a, b) => {
+      const la = (a.buyer.last_name || a.buyer_name || '').toLowerCase();
+      const lb = (b.buyer.last_name || b.buyer_name || '').toLowerCase();
+      return la.localeCompare(lb);
+    });
+
+    renderRosterList();
+  } catch(e) {
+    console.error('Roster load error:', e.message);
+    if(tbody) tbody.innerHTML = '<tr><td colspan="9" style="padding:2rem;text-align:center;color:var(--red);font-family:var(--fm)">Error: ' + e.message + '</td></tr>';
+  }
+}
+
+function renderRosterList() {
+  const tbody = document.getElementById('roster-tbody');
+  if(!tbody) return;
+  if(!_rosterData.length) {
+    tbody.innerHTML = '<tr><td colspan="9" style="padding:2rem;text-align:center;color:var(--txt3);font-family:var(--fm)">No registrations found.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = _rosterData.map((r, i) => {
+    const b      = r.buyer;
+    const last   = b.last_name  || (r.buyer_name||'').split(' ').slice(-1)[0]          || '—';
+    const first  = b.first_name || (r.buyer_name||'').split(' ').slice(0,-1).join(' ') || '—';
+    const usbc   = b.usbc      || '—';
+    const avg    = b.avg != null ? b.avg : '—';
+    const age    = b.age_label  || '—';
+    const gender = b.gender     || '—';
+    const bkts   = r.bracketCount || 0;
+    const checkedIn = r.scanned_at
+      ? '<span style="color:var(--ok);font-weight:700">✓ ' + new Date(r.scanned_at).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'}) + '</span>'
+      : '<span style="color:var(--txt3)">—</span>';
+    const bg = i % 2 === 0 ? '' : 'background:var(--bg2)';
+    return `<tr style="${bg}">
+      <td style="padding:.5rem .75rem;font-weight:600;color:var(--txt)">${esc(last)}</td>
+      <td style="padding:.5rem .75rem;color:var(--txt)">${esc(first)}</td>
+      <td style="padding:.5rem .75rem;font-family:var(--fm);color:var(--txt3)">${usbc}</td>
+      <td style="padding:.5rem .75rem;text-align:right;color:var(--txt)">${avg}</td>
+      <td style="padding:.5rem .75rem;color:var(--txt3)">${age}</td>
+      <td style="padding:.5rem .75rem;color:var(--txt3)">${gender}</td>
+      <td style="padding:.5rem .75rem;text-align:right;color:${bkts>0?'var(--blue)':'var(--txt3)'};font-weight:${bkts>0?'700':'400'}">${bkts||'—'}</td>
+      <td style="padding:.5rem .75rem">${checkedIn}</td>
+      <td style="padding:.5rem .75rem;color:var(--txt3);font-style:italic;font-size:10px">TBD</td>
+    </tr>`;
+  }).join('');
+}
+
+// ── Day-of Roster Export ──────────────────────────────────────────────────
+function exportDayOfRoster() {
+  if(!_rosterData.length) { alert('No roster data. Select an event and refresh first.'); return; }
+  const filter = document.getElementById('roster-event-filter')?.value || '';
+  const evName = filter ? (_events.find(e=>e.id===filter)?.name||filter) : 'All-Events';
+  const rows = [['Last Name','First Name','USBC #','Average','Age','Gender','Brackets','Check-In Time','Lane Assignment']];
+  _rosterData.forEach(r => {
+    const b = r.buyer;
+    const checkinTime = r.scanned_at ? new Date(r.scanned_at).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'}) : '';
+    rows.push([
+      b.last_name  || (r.buyer_name||'').split(' ').slice(-1)[0]          || '',
+      b.first_name || (r.buyer_name||'').split(' ').slice(0,-1).join(' ') || '',
+      b.usbc       || '',
+      b.avg != null ? b.avg : '',
+      b.age_label  || '',
+      b.gender     || '',
+      r.bracketCount || 0,
+      checkinTime,
+      '', // Lane Assignment — blank for TD to fill
+    ]);
+  });
+  _downloadXLSX(rows, 'DayOf-Roster-' + evName.replace(/[^a-z0-9]/gi,'-') + '-' + new Date().toISOString().slice(0,10) + '.xlsx');
+}
+
+// ── Full Registration Export ──────────────────────────────────────────────
+function exportFullRegistration() {
+  if(!_rosterData.length) { alert('No roster data. Select an event and refresh first.'); return; }
+  const filter = document.getElementById('roster-event-filter')?.value || '';
+  const evName = filter ? (_events.find(e=>e.id===filter)?.name||filter) : 'All-Events';
+  const rows = [[
+    'Last Name','First Name','USBC #','Average','Age','Gender','Brackets',
+    'Email','Phone','Address','City','State','ZIP',
+    'Guardian Name','Guardian Phone',
+    'Registration ID','Payment','Registered At','Check-In Time','Lane Assignment'
+  ]];
+  _rosterData.forEach(r => {
+    const b   = r.buyer;
+    const reg = r.purchased_at ? new Date(r.purchased_at).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) : '';
+    const checkinTime = r.scanned_at ? new Date(r.scanned_at).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}) : '';
+    rows.push([
+      b.last_name      || (r.buyer_name||'').split(' ').slice(-1)[0]          || '',
+      b.first_name     || (r.buyer_name||'').split(' ').slice(0,-1).join(' ') || '',
+      b.usbc           || '',
+      b.avg != null ? b.avg : '',
+      b.age_label      || '',
+      b.gender         || '',
+      r.bracketCount   || 0,
+      b.email          || r.buyer_email || '',
+      b.phone          || '',
+      b.address        || '',
+      b.city           || '',
+      b.state          || '',
+      b.zip_code       || '',
+      b.guardian_name  || '',
+      b.guardian_phone || '',
+      r.id             || '',
+      r.payment        || '',
+      reg,
+      checkinTime,
+      '', // Lane Assignment
+    ]);
+  });
+  _downloadXLSX(rows, 'Full-Registration-' + evName.replace(/[^a-z0-9]/gi,'-') + '-' + new Date().toISOString().slice(0,10) + '.xlsx');
+}
+
+// ── XLSX download helper (SheetJS) ───────────────────────────────────────
+function _downloadXLSX(rows, filename) {
+  if(typeof XLSX === 'undefined') { alert('SheetJS not loaded. Check your internet connection.'); return; }
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  const range = XLSX.utils.decode_range(ws['!ref']);
+  for(let c = range.s.c; c <= range.e.c; c++) {
+    const cell = XLSX.utils.encode_cell({ r:0, c });
+    if(ws[cell]) ws[cell].s = { font:{ bold:true } };
+  }
+  ws['!cols'] = rows[0].map((_, ci) => ({
+    wch: Math.min(50, Math.max(...rows.map(r => String(r[ci]??'').length + 2)))
+  }));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Data');
+  XLSX.writeFile(wb, filename);
 }
 
 // ══════════════════════════════════════════════════════
