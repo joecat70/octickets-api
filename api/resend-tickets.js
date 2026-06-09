@@ -121,6 +121,7 @@ module.exports = async (req, res) => {
         method: 'POST',
         headers: { ...headers, 'Prefer': 'return=minimal' },
         body: JSON.stringify({
+          id: crypto.randomUUID(),
           token,
           ticket_id: ticket.id,
           phone: sendToEmail,
