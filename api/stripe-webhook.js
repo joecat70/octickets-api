@@ -19,7 +19,7 @@
 
 const Stripe = require('stripe');
 const { createClient } = require('@supabase/supabase-js');
-
+const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...args));
 
 module.exports.config = { api: { bodyParser: false } };
 
@@ -145,11 +145,11 @@ module.exports = async (req, res) => {
 
         // ── 3b. No hold_ids — retry lookup to handle client-side race condition ─
         // Client writes tickets directly; webhook may fire before they're written.
-        // Retry up to 10 times with 2s delay (max 20s — within Vercel limit).
+        // Retry up to 5 times with 2s delay (max 10s — within Vercel limit).
         console.log('Webhook: no hold_ids — looking up tickets by tx_hash:', txHash);
 
         let txTickets = null;
-        for (let attempt = 1; attempt <= 10; attempt++) {
+        for (let attempt = 1; attempt <= 5; attempt++) {
             const { data } = await db
                 .from('tickets')
                 .select('id, event_id, event_name, tier_name, seat, seat_key, price, totp_seed, status, buyer_email')
