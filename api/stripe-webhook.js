@@ -19,7 +19,7 @@
 
 const Stripe = require('stripe');
 const { createClient } = require('@supabase/supabase-js');
-const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...args));
+
 
 module.exports.config = { api: { bodyParser: false } };
 
