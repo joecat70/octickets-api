@@ -7,24 +7,22 @@ const { v4: uuidv4 } = require('uuid');
 module.exports.config = { api: { bodyParser: false } };
 
 function getSupabase() {
-    const url = process.env.SUPABASE_URL;
-    const key = process.env.SUPABASE_SERVICE_KEY;
+    const url = process.env.SUPABASE_EVENTS_URL     || process.env.SUPABASE_URL;
+    const key = process.env.SUPABASE_EVENTS_SERVICE_KEY || process.env.SUPABASE_SERVICE_KEY;
     if (!url || !key) throw new Error('Supabase env vars not set');
     return createClient(url, key);
 }
 
-// Send gold claim-link style email — same as send.js type:'email'
-// Only sends for the REG-FEE ticket, not bracket add-ons
 async function sendConfirmationEmail({ db, tickets, email, name, venueUrl }) {
     const resendKey = process.env.RESEND_API_KEY;
     if (!resendKey) { console.warn('Webhook: RESEND_API_KEY not set'); return; }
 
-    // Filter to REG-FEE ticket only
+    // Filter to REG-FEE ticket only — bracket tickets are not door tickets
     const regTicket = tickets.find(t =>
         t.seat_key && (t.seat_key.includes('REG-FEE') || t.seat_key.startsWith('REG-'))
-    ) || tickets[0];
+    ) || tickets.find(t => !t.seat_key?.startsWith('BKT-') && !t.seat_key?.startsWith('BRACKET'));
 
-    if (!regTicket) { console.warn('Webhook: no REG ticket found'); return; }
+    if (!regTicket) { console.warn('Webhook: no REG ticket found in', tickets.map(t => t.seat_key)); return; }
 
     const baseUrl    = (venueUrl || 'https://octlregistration.eth.limo').replace(/\/+$/, '');
     const buyerName  = name || 'Bowler';
@@ -38,7 +36,7 @@ async function sendConfirmationEmail({ db, tickets, email, name, venueUrl }) {
         id:         uuidv4(),
         token,
         ticket_id:  regTicket.id,
-        phone:      email, // store email in phone field per existing schema
+        phone:      email,
         expires_at: expiresAt,
         claimed:    false,
     });
@@ -189,7 +187,7 @@ module.exports = async (req, res) => {
     const wallet     = meta.wallet  || null;
     const venueUrl   = meta.venue_url || 'https://octlregistration.eth.limo';
 
-    console.log(`Webhook: session ${sessionId} — holdIds=${holdIds.length}, txHash=${txHash}`);
+    console.log(`Webhook: session ${sessionId} — holdIds=${holdIds.length}, txHash=${txHash}, email=${email}`);
 
     try {
         const db = getSupabase();
@@ -201,6 +199,21 @@ module.exports = async (req, res) => {
 
             if (existingTickets?.every(t => t.status === 'valid')) {
                 console.log('Webhook: tickets already valid (client ran first) —', sessionId);
+                // Still send email if not already sent — check claim_tokens
+                const { data: existingClaim } = await db
+                    .from('claim_tokens')
+                    .select('id')
+                    .eq('ticket_id', existingTickets[0]?.id)
+                    .maybeSingle();
+                if (!existingClaim && email) {
+                    const { data: ticketRows } = await db
+                        .from('tickets')
+                        .select('id, event_id, event_name, tier_name, seat, seat_key, price, totp_seed, status')
+                        .in('id', holdIds);
+                    if (ticketRows?.length) {
+                        await sendConfirmationEmail({ db, tickets: ticketRows, email, name: buyerName || 'Guest', venueUrl });
+                    }
+                }
                 return res.status(200).json({ received: true });
             }
 
@@ -239,36 +252,66 @@ module.exports = async (req, res) => {
             return res.status(200).json({ received: true });
         }
 
-        // ── 3b. No hold_ids — retry for client-side race condition ────────────
-        console.log('Webhook: no hold_ids — looking up tickets by tx_hash:', txHash);
+        // ── 3b. No hold_ids — polling loop for client-side ticket write ───────
+        // The bowling flow writes tickets client-side after Stripe returns.
+        // We poll until tickets appear, using the full 55s budget on Pro plan.
+        // Retry config: 20 attempts × 2.5s = 50s total (under 55s safe limit)
+        console.log('Webhook: no hold_ids — polling for tx_hash:', txHash);
 
+        const MAX_ATTEMPTS  = 20;
+        const RETRY_DELAY   = 2500; // ms
         let txTickets = null;
-        for (let attempt = 1; attempt <= 10; attempt++) {
-            const { data } = await db
+
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            const { data, error } = await db
                 .from('tickets')
                 .select('id, event_id, event_name, tier_name, seat, seat_key, price, totp_seed, status, buyer_email')
-                .eq('tx_hash', txHash);
+                .eq('tx_hash', txHash)
+                .neq('seat_key', 'PROCESSING-FEE'); // exclude fee line items if any
+
+            if (error) console.error(`Webhook: DB error on attempt ${attempt}:`, error.message);
 
             if (data?.length) {
                 txTickets = data;
-                console.log(`Webhook: found ${data.length} ticket(s) on attempt ${attempt}`);
+                console.log(`Webhook: found ${data.length} ticket(s) on attempt ${attempt} (${attempt * RETRY_DELAY / 1000}s)`);
                 break;
             }
 
-            console.log(`Webhook: attempt ${attempt}/10 — no tickets yet, waiting 2s...`);
-            await new Promise(r => setTimeout(r, 2000));
+            if (attempt < MAX_ATTEMPTS) {
+                console.log(`Webhook: attempt ${attempt}/${MAX_ATTEMPTS} — no tickets yet, waiting ${RETRY_DELAY}ms...`);
+                await new Promise(r => setTimeout(r, RETRY_DELAY));
+            }
         }
 
         if (txTickets?.length) {
+            // Deduplicate — don't send if claim token already exists for this REG ticket
+            const regTicket = txTickets.find(t =>
+                t.seat_key && (t.seat_key.includes('REG-FEE') || t.seat_key.startsWith('REG-'))
+            ) || txTickets[0];
+
+            const { data: existingClaim } = await db
+                .from('claim_tokens')
+                .select('id')
+                .eq('ticket_id', regTicket.id)
+                .maybeSingle();
+
+            if (existingClaim) {
+                console.log('Webhook: claim token already exists — email already sent by client, skipping');
+                return res.status(200).json({ received: true });
+            }
+
             const ticketEmail = email || txTickets[0]?.buyer_email || '';
             if (ticketEmail) {
                 await sendConfirmationEmail({ db, tickets: txTickets, email: ticketEmail, name: buyerName || 'Guest', venueUrl });
+            } else {
+                console.warn('Webhook: no email address available for session', sessionId);
             }
+
             console.log(`Webhook: ✓ ${txTickets.length} ticket(s) confirmed via tx_hash — session ${sessionId}`);
             return res.status(200).json({ received: true });
         }
 
-        console.warn('Webhook: no tickets found after 10 attempts for session', sessionId);
+        console.warn(`Webhook: no tickets found after ${MAX_ATTEMPTS} attempts (${MAX_ATTEMPTS * RETRY_DELAY / 1000}s) for session`, sessionId);
         return res.status(200).json({ received: true });
 
     } catch (err) {
