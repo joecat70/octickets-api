@@ -9,8 +9,10 @@ module.exports.config = { api: { bodyParser: false } };
 function getSupabase() {
 const url = process.env.SUPABASE_URL;
 const key = process.env.SUPABASE_SERVICE_KEY;
+        if (!url || !key) throw new Error('Supabase env vars not set');
+        return createClient(url, key);
 }
-}
+
 
 async function sendConfirmationEmail({ db, tickets, email, name, venueUrl }) {
     const resendKey = process.env.RESEND_API_KEY;
