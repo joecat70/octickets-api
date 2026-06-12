@@ -1,3 +1,4 @@
+module.exports.config = { api: { bodyParser: true } };
 // api/verify-stripe-session.js
 // Verifies a Stripe checkout session after buyer returns from Stripe
 
