@@ -2,6 +2,9 @@ module.exports.config = { api: { bodyParser: true } };
 // api/verify-stripe-session.js
 // Verifies a Stripe checkout session after buyer returns from Stripe
 
+// api/verify-stripe-session.js
+// Verifies a Stripe checkout session after buyer returns from Stripe
+
 const Stripe = require('stripe');
 
 const CORS = {
@@ -10,8 +13,7 @@ const CORS = {
   'Access-Control-Allow-Headers': 'Content-Type',
 };
 
-module.exports = async (req, res) => {
-  // Handle CORS preflight
+async function handler(req, res) {
   Object.entries(CORS).forEach(([k, v]) => res.setHeader(k, v));
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
@@ -29,7 +31,6 @@ module.exports = async (req, res) => {
       return res.status(400).json({ error: 'Missing session_id' });
     }
 
-    // Retrieve the session from Stripe
     const session = await stripe.checkout.sessions.retrieve(session_id);
 
     return res.status(200).json({
@@ -46,4 +47,7 @@ module.exports = async (req, res) => {
     console.error('verify-stripe-session error:', err.message);
     return res.status(500).json({ error: err.message });
   }
-};
+}
+
+module.exports = handler;
+module.exports.config = { api: { bodyParser: true } };
