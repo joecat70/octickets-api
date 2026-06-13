@@ -3,7 +3,7 @@ const crypto = require('crypto');
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_SECRET_KEY;
+const supabaseKey = process.env.SUPABASE_SERVICE_KEY;
 
 const headers = {
   'apikey': supabaseKey,
