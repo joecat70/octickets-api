@@ -74,7 +74,7 @@ module.exports = async function handler(req, res) {
   // ── Supabase lookup ───────────────────────────────────────────────────────
   const db = createClient(
     process.env.SUPABASE_URL,
-    process.env.SUPABASE_SECRET_KEY
+    process.env.SUPABASE_SERVICE_KEY
   );
 
   const { data: ticket, error } = await db
