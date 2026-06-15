@@ -39,6 +39,12 @@ function verifyTOTP(hexSeed, code) {
   return false;
 }
 
+// ── Scan window constants ─────────────────────────────────────────────────────
+// Scanning opens 2 hours before doors and closes 4 hours after doors.
+// Adjust these if venues need a different window.
+const SCAN_WINDOW_BEFORE_MS = 2 * 60 * 60 * 1000; // 2 hours before doors
+const SCAN_WINDOW_AFTER_MS  = 4 * 60 * 60 * 1000; // 4 hours after doors
+
 module.exports = async function handler(req, res) {
   // Preflight
   if(req.method === 'OPTIONS') {
@@ -109,12 +115,82 @@ module.exports = async function handler(req, res) {
     });
   }
 
-  // ── Refunded / cancelled ──────────────────────────────────────────────────
+  // ── Refunded / cancelled / held ───────────────────────────────────────────
   if(['refunded', 'cancelled', 'held'].includes(ticket.status)) {
     return res.status(200).json({
       valid:  false,
       reason: `Ticket is ${ticket.status} — entry not permitted`,
     });
+  }
+
+  // ── ZeroScalp transfer hold ───────────────────────────────────────────────
+  // ticket.status === 'transfer_pending' means an exception transfer has been
+  // approved. The original holder cannot use this ticket for entry until the
+  // transfer is either completed (→ 'transferred') or denied (→ 'valid').
+  if(ticket.status === 'transfer_pending') {
+    return res.status(200).json({
+      valid:         false,
+      ticket_status: 'transfer_pending',
+      reason:        'Transfer hold — this ticket has an approved exception transfer in progress and cannot be used for entry',
+      ticket: {
+        id:   ticket.id,
+        seat: ticket.seat,
+      },
+    });
+  }
+
+  // ── Permanently transferred ───────────────────────────────────────────────
+  if(ticket.status === 'transferred') {
+    return res.status(200).json({
+      valid:  false,
+      reason: 'Ticket has been transferred — this QR code is no longer valid',
+    });
+  }
+
+  // ── Scan window check ─────────────────────────────────────────────────────
+  // Query event_config for doors_open. If configured, only allow scans within
+  // the window: [doors_open - 2hrs] through [doors_open + 4hrs].
+  // If doors_open is not configured, scanning is allowed at any time (fail-open
+  // so misconfigured events don't accidentally lock out valid ticket holders).
+  const resolvedEventId = ticket.event_id || eventId;
+  if(resolvedEventId) {
+    try {
+      const { data: config } = await db
+        .from('event_config')
+        .select('doors_open')
+        .eq('event_id', resolvedEventId)
+        .maybeSingle();
+
+      if(config?.doors_open) {
+        const now         = Date.now();
+        const doorsOpen   = new Date(config.doors_open).getTime();
+        const windowOpen  = doorsOpen - SCAN_WINDOW_BEFORE_MS;
+        const windowClose = doorsOpen + SCAN_WINDOW_AFTER_MS;
+
+        if(now < windowOpen) {
+          // Too early — scanning not yet open
+          const opensAt = new Date(windowOpen).toLocaleTimeString('en-US', {
+            hour: 'numeric', minute: '2-digit', timeZoneName: 'short',
+          });
+          return res.status(200).json({
+            valid:  false,
+            reason: `Scanning not open yet — door scanning opens at ${opensAt}`,
+          });
+        }
+
+        if(now > windowClose) {
+          // Too late — scanning window has closed
+          return res.status(200).json({
+            valid:  false,
+            reason: 'Scanning window has closed for this event',
+          });
+        }
+      }
+      // No doors_open configured — fail-open, allow scan
+    } catch(configErr) {
+      // Non-fatal — log and continue rather than blocking valid ticket holders
+      console.warn(`validate-ticket: event_config lookup failed for ${resolvedEventId}:`, configErr.message);
+    }
   }
 
   // ── Event mismatch (if scanner has event selected) ────────────────────────
