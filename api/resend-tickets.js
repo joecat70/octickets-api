@@ -1,3 +1,18 @@
+// api/resend-tickets.js
+// NOTE: original filename unconfirmed — rename to match the actual repo file.
+//
+// Two fixes applied to the original logic:
+//   1. claim_tokens.phone was being set to the buyer's EMAIL address, not an
+//      actual phone number. ZeroScalp's whole identity model is phone-based —
+//      a phone column full of email strings breaks anything downstream that
+//      ever trusts it.
+//   2. Manager resend only excluded status=refunded. A ticket sitting in
+//      transfer_pending (an approved ZeroScalp exception transfer, locked
+//      until T-30 delivery — see zeroscalp.js approve_exception) or already
+//      transferred could still get a fresh, working claim link handed to the
+//      ORIGINAL buyer, undermining the transfer hold entirely. Now excludes
+//      both, matching the same exclusion the self-serve buyer path already had.
+
 const { Resend } = require('resend');
 const crypto = require('crypto');
 
@@ -64,10 +79,13 @@ module.exports = async (req, res) => {
         body: JSON.stringify(buyerRecord),
       });
 
-      // 3. Fetch those specific tickets
+      // 3. Fetch those specific tickets.
+      // FIX 2: exclude transfer_pending/transferred in addition to refunded —
+      // a ticket mid-ZeroScalp-exception-hold (or already transferred away)
+      // must not get a working claim link resent to the original buyer.
       const ids = ticketIds.map(id => `"${id}"`).join(',');
       const ticketsRes = await fetch(
-        `${supabaseUrl}/rest/v1/tickets?id=in.(${ids})&status=neq.refunded&select=id,seat,event_id,event_name,tier_name,price,payment,status`,
+        `${supabaseUrl}/rest/v1/tickets?id=in.(${ids})&status=neq.refunded&status=neq.transfer_pending&status=neq.transferred&select=id,seat,event_id,event_name,tier_name,price,payment,status`,
         { headers }
       );
       tickets = await ticketsRes.json() || [];
@@ -124,7 +142,11 @@ module.exports = async (req, res) => {
           id: crypto.randomUUID(),
           token,
           ticket_id: ticket.id,
-          phone: sendToEmail,
+          // FIX 1: this was `sendToEmail` (an email address). claim_tokens.phone
+          // is meant to hold an actual phone number — use the real `phone` field
+          // already accepted in the request, falling back to blank rather than
+          // silently writing an email into a phone column.
+          phone: phone || '',
           expires_at: expires,
           claimed: false,
         }),
