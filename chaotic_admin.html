@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Club Chaotic — Venue Admin</title>
-<!-- chaotic_admin v2.3 -->
+<!-- chaotic_admin v2.4 -->
 <style>
   @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap');
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -202,7 +202,7 @@
       <div class="topbar-title">Door Entry</div>
     </div>
     <div class="topbar-right" style="display:flex;align-items:center;gap:10px">
-      <span class="version-pill">v2.3</span>
+      <span class="version-pill">v2.4</span>
       <button class="btn btn-ghost btn-sm" onclick="exitDoorScreen()">Exit</button>
     </div>
   </div>
@@ -223,7 +223,7 @@
       <div class="topbar-title">Venue Management</div>
     </div>
     <div class="topbar-right">
-      <span class="version-pill">v2.3</span>
+      <span class="version-pill">v2.4</span>
       <div class="topbar-divider"></div>
       <div class="db-status"><div class="db-dot" id="db-dot"></div><span id="db-status-text">Connecting…</span></div>
       <div class="topbar-divider"></div>
@@ -550,7 +550,7 @@
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script>
 // ════════════════════════════════════════════════════════════════════════
-// chaotic_admin v2.3 — Club Chaotic Venue Admin
+// chaotic_admin v2.4 — Club Chaotic Venue Admin
 // Same shared OCTL project as the public venue file. Real Supabase Auth
 // replaces the old client-side PIN for everything except the Door Scanner
 // (see note above the door panel for why that one's different).
@@ -1122,11 +1122,13 @@ async function renderFanGraph(selectEventId){
     EVENTS = data || [];
   }
   const rows = await Promise.all(EVENTS.map(async ev => {
-    const { data: t } = await db.from('tickets').select('payment,status,price,fee').eq('event_id', ev.id).neq('status','held').neq('status','refunded');
+    // FIX: 'fee' is not a real column on tickets — see sfCalc() for full explanation.
+    const { data: t, error } = await db.from('tickets').select('payment,status,price').eq('event_id', ev.id).neq('status','held').neq('status','refunded');
+    if(error) console.error('renderFanGraph: ticket fetch failed for', ev.id, error.message);
     const tickets = t || [];
     const comps = tickets.filter(x => x.payment === 'Complimentary');
     const paid = tickets.filter(x => x.payment !== 'Complimentary');
-    const revenue = paid.reduce((s,x) => s + (x.price||0) + (x.fee||0), 0);
+    const revenue = paid.reduce((s,x) => s + (x.price||0), 0) + (paid.length * (ev.tier1_fee || 0));
     return { ev, count: tickets.length, paidCount: paid.length, compCount: comps.length, revenue, capacity: ev.max_entrants || 750 };
   }));
 
@@ -1361,7 +1363,14 @@ function sfCapped(eventId, field){
 
 async function sfCalc(eventId){
   if(!_sfTickets[eventId]){
-    const { data } = await db.from('tickets').select('price,fee,status,payment,tx_hash').eq('event_id', eventId);
+    // FIX: 'fee' is NOT a real column on tickets — it was a client-side-only
+    // property in the original venue file (set at creation time from event
+    // config, never persisted). Selecting it threw a 42703 "column does not
+    // exist" error on every call, which silently fell back to an empty
+    // ticket array via `data || []` — meaning every P&L calc since this was
+    // added computed against zero tickets, with no visible error anywhere.
+    const { data, error } = await db.from('tickets').select('price,status,payment,tx_hash').eq('event_id', eventId);
+    if(error) console.error('sfCalc: ticket fetch failed for', eventId, error.message);
     _sfTickets[eventId] = data || [];
   }
   const all = _sfTickets[eventId];
@@ -1372,15 +1381,19 @@ async function sfCalc(eventId){
   const admitted  = all.filter(t => t.status === 'scanned');
 
   // Box office → NBOR (off-the-top deductions only, before any expense is touched)
+  // feesCollected derived from the event's real tier1_fee column (a flat
+  // per-ticket service fee set at event creation), since there's no actual
+  // per-ticket fee column to sum.
+  const evForFee        = EVENTS.find(e => e.id === eventId);
+  const feesCollected  = paid.length * (evForFee?.tier1_fee || 0);
   const grossTicket    = paid.reduce((s,t)=>s+(t.price||0),0);
-  const feesCollected  = paid.reduce((s,t)=>s+(t.fee||0),0);
   const taxRate        = sfGet(eventId,'tax_rate',0)/100;
   const taxAmt         = grossTicket * taxRate;
   const facilityPerTix = sfGet(eventId,'facility_fee_per_ticket',0);
   const facilityFees   = paid.length * facilityPerTix;
   const stripeSessions = new Set(paid.filter(t=>t.payment==='Card').map(t=>t.tx_hash).filter(Boolean));
   const stripeEst       = (grossTicket+feesCollected)*SF_STRIPE_RATE + stripeSessions.size*SF_STRIPE_FIXED;
-  const refundAmt       = refunded.reduce((s,t)=>s+(t.price||0)+(t.fee||0),0);
+  const refundAmt       = refunded.reduce((s,t)=>s+(t.price||0),0); // fee not tracked per-ticket — see note above
   const NBOR = grossTicket + feesCollected - taxAmt - facilityFees - stripeEst - refundAmt;
 
   // Expenses — capped per line; guarantee has no cap, it's the contractual floor
