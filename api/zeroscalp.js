@@ -11,6 +11,13 @@
 //   'approve_exception'           → venue/platform approval
 //   'deny_exception'              → venue/platform denial
 //   'release_approved_exceptions' → 30-min pre-doors delivery
+//
+// FIX (this revision): release_approved_exceptions previously spread
+// ...origTicket into the new recipient ticket, which carried over the
+// ORIGINAL tx_hash unchanged. claim.js groups "sibling" tickets by tx_hash
+// to support multi-seat purchases — so the recipient's claim link would
+// also surface every other ticket (and PII) from the original buyer's same
+// checkout session. Fixed by giving the new ticket its own unique tx_hash.
 // ============================================================
 
 const { createClient } = require('@supabase/supabase-js');
@@ -129,8 +136,6 @@ function tplExceptionReceived({ excReq, eventName, seat, ticketId }) {
 }
 
 // Notification 2 — Approved (to requestor)
-// FIX: removed "original ticket remains valid" — ticket is now transfer_pending
-// and cannot be used for entry until the transfer is complete or denied.
 function tplExceptionApproved({ excReq, eventName, seat }) {
   return baseTemplate(`
     <div style="font-size:17px;font-weight:700;color:#1d9e75;margin-bottom:6px">✓ Exception Transfer Approved</div>
@@ -425,11 +430,6 @@ module.exports = async function handler(req, res) {
 
   // ============================================================
   // ACTION: approve_exception
-  // FIX: immediately sets original ticket to 'transfer_pending'
-  // so the original holder cannot use it for entry between
-  // approval and the T-30 delivery window.
-  // Triggers Notification 2 — approved email to requestor.
-  // Body: { action, request_id, reviewer_notes }
   // ============================================================
   if (action === 'approve_exception') {
     const { request_id, reviewer_notes } = req.body;
@@ -443,10 +443,6 @@ module.exports = async function handler(req, res) {
 
       const now = new Date().toISOString();
 
-      // FIX: Set original ticket to 'transfer_pending' immediately on approval.
-      // This prevents the original holder from using their QR code for entry
-      // during the window between approval and the T-30 delivery.
-      // The door scanner must deny 'transfer_pending' status.
       const { error: ticketUpdateErr } = await supabase
         .from('tickets')
         .update({ status: 'transfer_pending', updated_at: now })
@@ -467,12 +463,10 @@ module.exports = async function handler(req, res) {
         .eq('id', 'plat-' + request_id)
         .then(() => {}, e => console.error('Platform approve sync error:', e.message));
 
-      // Load ticket info for notification
       const { data: ticket } = await supabase.from('tickets').select('seat, event_name').eq('id', excReq.ticket_id).maybeSingle();
       const eventName = ticket?.event_name || excReq.event_id;
       const seat      = ticket?.seat || '—';
 
-      // Notification 2 — approved → requestor
       if (excReq.requestor_email) {
         sendNotificationEmail({
           to:      excReq.requestor_email,
@@ -480,7 +474,6 @@ module.exports = async function handler(req, res) {
           html:    tplExceptionApproved({ excReq, eventName, seat }),
         });
       }
-      // Platform copy
       sendNotificationEmail({
         to:      PLATFORM_ADMIN_EMAIL,
         subject: `[Platform] Exception Approved — ${request_id}`,
@@ -503,10 +496,6 @@ module.exports = async function handler(req, res) {
 
   // ============================================================
   // ACTION: deny_exception
-  // FIX: if ticket was previously set to transfer_pending
-  // (i.e. approved then re-denied), restore it to 'valid'.
-  // Triggers Notification 3 — denied email to requestor.
-  // Body: { action, request_id, reviewer_notes }
   // ============================================================
   if (action === 'deny_exception') {
     const { request_id, reviewer_notes } = req.body;
@@ -518,8 +507,6 @@ module.exports = async function handler(req, res) {
 
       const now = new Date().toISOString();
 
-      // Restore ticket to 'valid' if it was locked as transfer_pending on a prior approval.
-      // Covers the edge case where approve → deny sequence occurs.
       const { data: ticket } = await supabase.from('tickets').select('status, seat, event_name').eq('id', excReq.ticket_id).maybeSingle();
       if (ticket?.status === 'transfer_pending') {
         await supabase.from('tickets')
@@ -540,7 +527,6 @@ module.exports = async function handler(req, res) {
       const eventName = ticket?.event_name || excReq.event_id;
       const seat      = ticket?.seat || '—';
 
-      // Notification 3 — denied → requestor
       if (excReq.requestor_email) {
         sendNotificationEmail({
           to:      excReq.requestor_email,
@@ -558,13 +544,6 @@ module.exports = async function handler(req, res) {
 
   // ============================================================
   // ACTION: release_approved_exceptions
-  // FIX: creates a NEW ticket record for the recipient instead
-  // of reassigning buyer fields on the original. Original ticket
-  // is set to 'transferred' (permanently dead). This ensures
-  // two distinct ticket IDs — the original QR is cryptographically
-  // invalid after transfer, not just reassigned.
-  // Triggers Notifications 4a + 4b.
-  // Body: { action }
   // ============================================================
   if (action === 'release_approved_exceptions') {
     try {
@@ -597,7 +576,6 @@ module.exports = async function handler(req, res) {
             continue;
           }
 
-          // Mark pending delivery
           await supabase.from('exception_requests').update({
             delivery_status: 'pending_exception_delivery', updated_at: now.toISOString(),
           }).eq('id', excReq.id);
@@ -605,7 +583,6 @@ module.exports = async function handler(req, res) {
             delivery_status: 'pending_exception_delivery', updated_at: now.toISOString(),
           }).eq('id', 'plat-' + excReq.id).then(() => {}, () => {});
 
-          // Load original ticket to copy its data for the new ticket
           const { data: origTicket } = await supabase
             .from('tickets')
             .select('*')
@@ -617,13 +594,18 @@ module.exports = async function handler(req, res) {
             continue;
           }
 
-          // FIX: Create a NEW ticket for the recipient — fresh ID, fresh QR seed.
-          // The original ticket's QR code is tied to its ID; by issuing a new ID
-          // the original QR is permanently dead regardless of status.
+          // FIX: new ticket gets its OWN tx_hash — previously inherited the
+          // original's via the ...origTicket spread, which meant claim.js's
+          // sibling-ticket lookup (grouping by tx_hash for multi-seat orders)
+          // would also surface the original buyer's other tickets + PII to
+          // this exception-transfer recipient. The new ID itself already
+          // makes the QR cryptographically distinct; tx_hash needs to match.
           const newTicketId = origTicket.id.replace(/^CADB-/, 'CADB-X-');
+          const newTxHash   = 'exception:' + newTicketId;
           const { error: newTicketErr } = await supabase.from('tickets').insert({
             ...origTicket,
             id:           newTicketId,
+            tx_hash:      newTxHash,
             buyer_email:  excReq.recipient_email || null,
             buyer_name:   excReq.recipient_name  || null,
             buyer_phone:  excReq.recipient_phone  || null,
@@ -639,15 +621,11 @@ module.exports = async function handler(req, res) {
             continue;
           }
 
-          // FIX: Permanently invalidate the original ticket.
-          // Status 'transferred' is final — door scanner denies entry,
-          // QR validation rejects it, no further changes permitted.
           await supabase.from('tickets').update({
             status:     'transferred',
             updated_at: now.toISOString(),
           }).eq('id', excReq.ticket_id);
 
-          // Create claim token for recipient pointing to the NEW ticket ID
           const token     = uuidv4();
           const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
           const baseUrl   = process.env.VENUE_BASE_URL || 'https://theetestsite.eth.limo';
@@ -660,11 +638,9 @@ module.exports = async function handler(req, res) {
           }).then(() => {}, e => console.error('Claim token error:', e.message));
           const claimUrl = `${baseUrl}/#claim=${token}`;
 
-          // Load event info for notifications
           const eventName = origTicket.event_name || excReq.event_id;
           const seat      = origTicket.seat || '—';
 
-          // Mark delivered
           await supabase.from('exception_requests').update({
             delivery_status: 'delivered', updated_at: now.toISOString(),
           }).eq('id', excReq.id);
@@ -672,7 +648,6 @@ module.exports = async function handler(req, res) {
             delivery_status: 'delivered', updated_at: now.toISOString(),
           }).eq('id', 'plat-' + excReq.id).then(() => {}, () => {});
 
-          // Notification 4a — ticket delivered to recipient
           if (excReq.recipient_email) {
             sendNotificationEmail({
               to:      excReq.recipient_email,
@@ -681,7 +656,6 @@ module.exports = async function handler(req, res) {
             });
           }
 
-          // Notification 4b — transfer complete to requestor
           if (excReq.requestor_email) {
             sendNotificationEmail({
               to:      excReq.requestor_email,
