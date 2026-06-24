@@ -1,0 +1,1678 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Club Chaotic — Venue Admin</title>
+<!-- chaotic_admin v2.3 -->
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap');
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg:#15181d; --bg2:#1b1e25; --bg3:#23262e; --bg4:#2a2e38;
+    --border:#343a47; --border2:#4d5568;
+    --txt:#e8eaf0; --txt2:#a8adb8; --txt3:#9298a8;
+    --gold:#c9a84c; --goldl:rgba(201,168,76,0.12); --goldb:rgba(201,168,76,0.25);
+    --ok:#1d9e75; --okl:rgba(29,158,117,0.12); --okd:#22c97a;
+    --red:#c0392b; --redl:rgba(192,57,43,0.12); --redd:#e07070;
+    --amber:#d97706; --amberl:rgba(217,119,6,0.12); --amberd:#d9a45c;
+    --blue:#3d7abf; --bluel:rgba(61,122,191,0.12);
+    --fm:'IBM Plex Mono',monospace; --fs:'IBM Plex Sans',sans-serif;
+    --radius:4px; --shadow:0 4px 24px rgba(0,0,0,0.5);
+  }
+  html,body { height:100%; background:var(--bg); color:var(--txt); font-family:var(--fs); }
+  body::before {
+    content:''; position:fixed; inset:0;
+    background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.03) 2px,rgba(0,0,0,0.03) 4px);
+    pointer-events:none; z-index:9999;
+  }
+  .btn { display:inline-flex; align-items:center; justify-content:center; gap:.4rem; padding:10px 18px; border-radius:var(--radius); font-family:var(--fs); font-size:13px; font-weight:600; cursor:pointer; border:1px solid transparent; transition:all .15s; }
+  .btn-gold { background:var(--gold); color:#0d0f12; border-color:var(--gold); width:100%; padding:12px; font-family:var(--fm); font-size:12px; letter-spacing:1px; text-transform:uppercase; }
+  .btn-gold:hover { background:#d4b05a; }
+  .btn-gold:disabled { opacity:.5; cursor:not-allowed; }
+  .btn-ghost { background:transparent; color:var(--txt2); border-color:var(--border2); }
+  .btn-ghost:hover { background:var(--bg3); color:var(--txt); }
+  .btn-ok { background:var(--ok); color:#fff; border-color:var(--ok); font-family:var(--fm); font-size:11px; letter-spacing:1px; text-transform:uppercase; }
+  .btn-ok:hover { background:#1fb880; }
+  .btn-ok:disabled { opacity:.5; cursor:not-allowed; }
+  .btn-danger { background:transparent; color:var(--red); border-color:var(--red); font-family:var(--fm); font-size:11px; letter-spacing:1px; text-transform:uppercase; }
+  .btn-danger:hover { background:var(--redl); }
+  .btn-sm { padding:6px 12px; font-size:11px; }
+  .form-label { display:block; font-family:var(--fm); font-size:9px; font-weight:600; letter-spacing:2px; text-transform:uppercase; color:var(--txt3); margin-bottom:.5rem; }
+  .form-input { width:100%; background:var(--bg4); border:1px solid var(--border2); border-radius:var(--radius); padding:10px 14px; font-family:var(--fm); font-size:13px; color:var(--txt); outline:none; transition:border-color .15s; }
+  .form-input:focus { border-color:var(--gold); }
+  .form-input::placeholder { color:var(--txt3); }
+  .form-group { margin-bottom:1.25rem; }
+  .form-hint { font-family:var(--fm); font-size:10px; color:var(--txt3); margin-top:4px; line-height:1.5; }
+  .form-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .form-grid .span2 { grid-column:1/-1; }
+  .err-msg { background:var(--redl); border:1px solid rgba(192,57,43,0.3); border-radius:var(--radius); padding:.65rem .85rem; font-size:12px; color:var(--redd); margin-bottom:1rem; font-family:var(--fm); }
+  .info-box { border-radius:var(--radius); padding:.75rem 1rem; font-size:12px; line-height:1.6; margin-bottom:.75rem; }
+  .info-gold { background:var(--goldl); border:1px solid var(--goldb); color:var(--gold); }
+  .info-ok { background:var(--okl); border:1px solid rgba(29,158,117,0.3); color:var(--ok); }
+  .info-amber { background:var(--amberl); border:1px solid rgba(217,119,6,0.3); color:var(--amber); }
+  .info-blue { background:var(--bluel); border:1px solid rgba(61,122,191,0.3); color:var(--blue); }
+  .card { background:var(--bg3); border:1px solid var(--border); border-radius:var(--radius); padding:.75rem; margin-bottom:.75rem; }
+  .empty { text-align:center; color:var(--txt3); font-family:var(--fm); font-size:12px; padding:2rem 0; }
+  .spinner { display:inline-block; width:14px; height:14px; border:2px solid var(--border2); border-top-color:var(--gold); border-radius:50%; animation:spin .7s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+
+  /* ── LOGIN ── */
+  #login-screen { min-height:100vh; display:flex; align-items:center; justify-content:center; padding:1.5rem; }
+  .login-wrap { max-width:760px; width:100%; }
+  .login-mark { text-align:center; margin-bottom:2rem; }
+  .login-mark-logo { font-family:var(--fm); font-size:11px; letter-spacing:2px; color:var(--txt3); text-transform:uppercase; }
+  .login-mark-title { font-size:26px; font-weight:700; margin:.35rem 0; }
+  .login-mark-sub { font-family:var(--fm); font-size:11px; color:var(--txt3); letter-spacing:1px; }
+  .login-panels { display:grid; grid-template-columns:1fr 1fr; gap:1rem; }
+  @media (max-width:640px) { .login-panels { grid-template-columns:1fr; } }
+  .login-panel { background:var(--bg2); border:1px solid var(--border); border-radius:8px; padding:1.5rem; text-align:center; }
+  .panel-icon { font-size:28px; margin-bottom:.5rem; }
+  .panel-title { font-size:16px; font-weight:700; margin-bottom:.2rem; }
+  .panel-desc { font-family:var(--fm); font-size:11px; color:var(--txt3); margin-bottom:1.25rem; }
+  .btn-panel-admin { width:100%; padding:12px; border-radius:var(--radius); background:var(--gold); color:#0d0f12; border:1px solid var(--gold); font-family:var(--fm); font-size:12px; letter-spacing:1px; text-transform:uppercase; font-weight:600; cursor:pointer; }
+  .btn-panel-admin:hover { background:#d4b05a; }
+  .btn-panel-door { width:100%; padding:12px; border-radius:var(--radius); background:transparent; color:var(--txt); border:1px solid var(--border2); font-family:var(--fm); font-size:12px; letter-spacing:1px; text-transform:uppercase; font-weight:600; cursor:pointer; }
+  .btn-panel-door:hover { background:var(--bg3); }
+  .sub-form { display:none; text-align:left; margin-top:1rem; }
+  .sub-form.visible { display:block; }
+  .back-link { display:block; font-family:var(--fm); font-size:10px; color:var(--txt3); cursor:pointer; margin-bottom:.85rem; }
+  .back-link:hover { color:var(--txt2); }
+
+  /* ── TOPBAR / TABS ── */
+  .topbar { display:flex; justify-content:space-between; align-items:center; padding:.85rem 1.5rem; background:var(--bg2); border-bottom:1px solid var(--border); }
+  .topbar-left, .topbar-right { display:flex; align-items:center; gap:.85rem; }
+  .topbar-logo { font-weight:700; font-size:14px; }
+  .topbar-divider { width:1px; height:18px; background:var(--border2); }
+  .topbar-title { font-family:var(--fm); font-size:11px; color:var(--txt3); letter-spacing:1px; text-transform:uppercase; }
+  .db-status { display:flex; align-items:center; gap:6px; font-family:var(--fm); font-size:11px; color:var(--txt3); }
+  .db-dot { width:7px; height:7px; border-radius:50%; background:var(--txt3); }
+  .db-dot.ok { background:var(--okd); }
+  .db-dot.err { background:var(--redd); }
+  .topbar-user { font-family:var(--fm); font-size:11px; color:var(--txt2); }
+  .version-pill { font-family:var(--fm); font-size:10px; font-weight:700; letter-spacing:.5px; color:var(--gold); background:var(--goldl); border:1px solid var(--goldb); border-radius:10px; padding:3px 9px; }
+  .content { max-width:1080px; margin:0 auto; padding:1.5rem; }
+  .tab-nav { display:flex; gap:6px; margin-bottom:1.25rem; flex-wrap:wrap; border-bottom:1px solid var(--border); padding-bottom:0; }
+  .tab-btn { background:transparent; border:none; border-bottom:2px solid transparent; color:var(--txt3); font-family:var(--fm); font-size:11px; letter-spacing:.8px; text-transform:uppercase; padding:.7rem .9rem; cursor:pointer; }
+  .tab-btn:hover { color:var(--txt2); }
+  .tab-btn.active { color:var(--gold); border-bottom-color:var(--gold); }
+  .tab-panel { display:none; }
+  .tab-panel.active { display:block; }
+  .card-title-lg { font-size:16px; font-weight:700; }
+  .t-row { display:flex; justify-content:space-between; align-items:baseline; padding:.3rem 0; border-bottom:1px solid var(--border); font-size:12px; }
+  .t-label { color:var(--txt3); font-family:var(--fm); }
+  .t-val { color:var(--txt); font-weight:600; text-align:right; }
+  .sf-row { display:flex; justify-content:space-between; padding:.3rem 0; border-bottom:1px solid var(--border); font-size:12px; color:var(--txt2); }
+  .sf-row span:last-child { color:var(--txt); font-weight:600; }
+  .sf-subtotal { font-weight:700; border-top:1px solid var(--border2); margin-top:.2rem; }
+  .sf-subtotal span:last-child { color:var(--txt) !important; }
+  .sf-total { font-weight:800; font-size:13px; border-top:2px solid var(--border2); border-bottom:none; padding-top:.5rem; margin-top:.3rem; }
+  .sf-field-label { display:block; font-size:10px; color:var(--txt3); font-family:var(--fm); text-transform:uppercase; letter-spacing:.5px; margin-bottom:3px; }
+  .sf-input { margin-bottom:0; padding:8px 10px; font-size:12px; }
+  .sf-panel { animation:sfFadeIn .2s ease; }
+  @keyframes sfFadeIn { from{opacity:0;transform:translateY(-4px)} to{opacity:1;transform:translateY(0)} }
+  .section-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem; }
+
+  /* ── DOOR SCANNER ── */
+  #door-screen { min-height:100vh; padding:1.5rem; max-width:480px; margin:0 auto; }
+  .scan-result { background:var(--bg2); border:1px solid var(--border); border-radius:8px; padding:2rem 1rem; text-align:center; margin:1rem 0; min-height:180px; display:flex; align-items:center; justify-content:center; }
+  .scan-valid { background:#0a1f14; border-color:rgba(34,201,122,0.4); }
+  .scan-invalid { background:#1f0a0a; border-color:rgba(224,85,85,0.4); }
+  #scan-video { width:100%; border-radius:8px; background:#000; }
+</style>
+</head>
+<body>
+
+<!-- ══════════════════════════════════════════════ -->
+<!--  LOGIN SCREEN                                   -->
+<!-- ══════════════════════════════════════════════ -->
+<div id="login-screen">
+  <div class="login-wrap">
+    <div class="login-mark">
+      <div class="login-mark-logo">OC Tickets Live</div>
+      <div class="login-mark-title">Club Chaotic — Venue Admin</div>
+      <div class="login-mark-sub">Select Access Level</div>
+    </div>
+
+    <div class="login-panels">
+
+      <!-- ── MANAGER PANEL ── -->
+      <div class="login-panel">
+        <div class="panel-icon">🖥</div>
+        <div class="panel-title">Venue Management</div>
+        <div class="panel-desc">Manager access · Full dashboard</div>
+
+        <div id="admin-entry">
+          <button class="btn-panel-admin" onclick="showAdminForm()">Manager Login →</button>
+        </div>
+
+        <div id="admin-form" class="sub-form">
+          <span class="back-link" onclick="hideAdminForm()">← Back</span>
+          <div id="login-err" class="err-msg" style="display:none"></div>
+          <div class="form-group">
+            <label class="form-label" for="login-email">Email</label>
+            <input class="form-input" type="email" id="login-email" placeholder="manager@octicketslive.com" autocomplete="email">
+          </div>
+          <div class="form-group" style="margin-bottom:1rem">
+            <label class="form-label" for="login-pass">Password</label>
+            <input class="form-input" type="password" id="login-pass" placeholder="••••••••" autocomplete="current-password">
+          </div>
+          <button class="btn-panel-admin" id="login-btn" onclick="doLogin()">Sign In →</button>
+        </div>
+      </div>
+
+      <!-- ── DOOR SCANNER PANEL ── -->
+      <!-- Note: this PIN gates UI visibility only. Scanning calls
+               /api/validate-ticket, which is independently secured with the
+               service-role key server-side — this PIN never grants any
+               direct database access, so it carries none of the risk the
+               old Hub/Venue-OS PINs did. -->
+      <div class="login-panel">
+        <div class="panel-icon">📷</div>
+        <div class="panel-title">Door Scanner</div>
+        <div class="panel-desc">Staff access · Scan only</div>
+
+        <div id="door-entry">
+          <button class="btn-panel-door" onclick="showDoorForm()">Open Scanner →</button>
+        </div>
+
+        <div id="door-form" class="sub-form">
+          <span class="back-link" onclick="hideDoorForm()">← Back</span>
+          <div id="door-err" class="err-msg" style="display:none"></div>
+          <div class="form-group" style="margin-bottom:1rem">
+            <label class="form-label" for="door-pin">Door Entry PIN</label>
+            <input class="form-input" type="password" id="door-pin" placeholder="••••••••" maxlength="8">
+          </div>
+          <button class="btn-panel-door" onclick="checkDoorPin()">Open Scanner →</button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════ -->
+<!--  DOOR SCANNER SCREEN                            -->
+<!-- ══════════════════════════════════════════════ -->
+<div id="door-screen" style="display:none">
+  <div class="topbar" style="margin:-1.5rem -1.5rem 1.5rem -1.5rem">
+    <div class="topbar-left">
+      <div class="topbar-logo">Club Chaotic</div>
+      <div class="topbar-divider"></div>
+      <div class="topbar-title">Door Entry</div>
+    </div>
+    <div class="topbar-right" style="display:flex;align-items:center;gap:10px">
+      <span class="version-pill">v2.3</span>
+      <button class="btn btn-ghost btn-sm" onclick="exitDoorScreen()">Exit</button>
+    </div>
+  </div>
+  <video id="scan-video" autoplay muted playsinline></video>
+  <div class="scan-result" id="scan-result"><div id="scan-inner">Point camera at QR code</div></div>
+  <div style="text-align:center;font-family:var(--fm);font-size:12px;color:var(--txt3);margin-bottom:.5rem">Scanned today: <span id="scan-count">0</span></div>
+  <div id="scan-log"></div>
+</div>
+
+<!-- ══════════════════════════════════════════════ -->
+<!--  ADMIN SCREEN                                   -->
+<!-- ══════════════════════════════════════════════ -->
+<div id="admin-screen" style="display:none">
+  <div class="topbar">
+    <div class="topbar-left">
+      <div class="topbar-logo">Club Chaotic Admin</div>
+      <div class="topbar-divider"></div>
+      <div class="topbar-title">Venue Management</div>
+    </div>
+    <div class="topbar-right">
+      <span class="version-pill">v2.3</span>
+      <div class="topbar-divider"></div>
+      <div class="db-status"><div class="db-dot" id="db-dot"></div><span id="db-status-text">Connecting…</span></div>
+      <div class="topbar-divider"></div>
+      <div class="topbar-user" id="topbar-email"></div>
+      <button class="btn btn-ghost btn-sm" onclick="doSignOut()">Sign Out</button>
+    </div>
+  </div>
+
+  <div class="content">
+    <div class="tab-nav">
+      <button class="tab-btn active" onclick="showTab('overview')">Overview</button>
+      <button class="tab-btn" onclick="showTab('fangraph')">Fan Graph</button>
+      <button class="tab-btn" onclick="showTab('royalties')">Royalty Revenue</button>
+      <button class="tab-btn" onclick="showTab('customers')">Customers</button>
+      <button class="tab-btn" onclick="showTab('shows')">Shows (P&amp;L)</button>
+      <button class="tab-btn" onclick="showTab('add')">Add Event</button>
+      <button class="tab-btn" onclick="showTab('resend')">Resend Tickets</button>
+      <button class="tab-btn" onclick="showTab('payouts')">Payouts</button>
+      <button class="tab-btn" onclick="showTab('exceptions')">Exceptions</button>
+      <button class="tab-btn" onclick="showTab('door')">Door Scanner</button>
+    </div>
+
+    <!-- ── EVENTS ── -->
+    <div id="tab-overview" class="tab-panel active">
+      <div class="section-header">
+        <div class="card-title-lg">Club Chaotic — Overview</div>
+        <div class="form-hint" id="overview-show-label">Select a show below</div>
+      </div>
+      <div id="overview-metrics" style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:1rem"></div>
+      <div class="card-title-lg" style="font-size:13px;margin-bottom:.5rem">Shows</div>
+      <div id="overview-show-list"></div>
+      <div class="form-hint" style="margin-top:1rem">Aggregate stats only — no individual buyer data appears here. For customer-level detail, use Customers or Fan Graph.</div>
+    </div>
+
+    <div id="tab-fangraph" class="tab-panel">
+      <div class="section-header">
+        <div class="card-title-lg">Fan Graph — Revenue by Show</div>
+        <button class="btn btn-ghost btn-sm" onclick="_fanGraphEventId=null;renderFanGraph()">All Shows</button>
+      </div>
+      <div id="fg-breakdown"></div>
+
+      <div class="card" style="margin-top:1rem">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.65rem;flex-wrap:wrap;gap:.5rem">
+          <div class="card-title-lg" style="font-size:13px">🔗 Ticket Provenance</div>
+          <div id="fg-provenance-label" style="font-size:10px;color:var(--txt3);font-family:var(--fm)"></div>
+        </div>
+        <div class="form-grid" style="margin-bottom:.75rem">
+          <div class="form-group" style="margin-bottom:0">
+            <label class="form-label">Search Ticket ID or Buyer Name</label>
+            <input class="form-input" id="fg-search" placeholder="CADB-001 or John Smith" style="margin-bottom:0" oninput="renderFanGraph()">
+          </div>
+          <div class="form-group" style="margin-bottom:0">
+            <label class="form-label">Filter by Payment</label>
+            <select class="form-input" id="fg-payment" style="margin-bottom:0" onchange="renderFanGraph()">
+              <option value="">All Methods</option>
+              <option value="Card">Stripe (Card)</option>
+              <option value="Crypto Wallet">Crypto Wallet</option>
+            </select>
+          </div>
+        </div>
+        <div id="fg-provenance"></div>
+      </div>
+    </div>
+
+    <div id="tab-royalties" class="tab-panel">
+      <div class="info-box info-blue">Estimated from resale records in Payouts — 10% of listed resale price, matching the platform's standard royalty rate. Not a separate tracked ledger; recompute if the rate ever changes per-event.</div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:1rem">
+        <div class="card"><div class="form-label">Total Resales</div><div style="font-size:22px;font-weight:700" id="roy-resales">—</div></div>
+        <div class="card"><div class="form-label">Resale Volume</div><div style="font-size:22px;font-weight:700;color:var(--gold)" id="roy-volume">—</div></div>
+        <div class="card"><div class="form-label">Est. Royalties</div><div style="font-size:22px;font-weight:700;color:var(--blue)" id="roy-collected">—</div></div>
+      </div>
+      <div id="royalty-list"></div>
+    </div>
+
+    <div id="tab-customers" class="tab-panel">
+      <div class="section-header">
+        <div>
+          <div class="card-title-lg">Customer Data</div>
+          <div class="form-hint">All buyers for this venue — used for marketing per Terms of Service</div>
+        </div>
+        <div style="display:flex;gap:8px">
+          <select class="form-input" id="cust-event-filter" style="margin-bottom:0" onchange="renderCustomerList()"><option value="">All Events</option></select>
+          <button class="btn btn-ghost btn-sm" onclick="exportCustomersCSV()">⬇ Export XLSX</button>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:1rem">
+        <div class="card"><div class="form-label">Total Buyers</div><div style="font-size:20px;font-weight:700" id="cust-total">—</div></div>
+        <div class="card"><div class="form-label">With Email</div><div style="font-size:20px;font-weight:700;color:var(--blue)" id="cust-email-count">—</div></div>
+        <div class="card"><div class="form-label">With Phone</div><div style="font-size:20px;font-weight:700" id="cust-phone-count">—</div></div>
+      </div>
+      <div style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:11px">
+          <thead><tr style="background:var(--bg3)">
+            <th style="text-align:left;padding:.5rem .6rem;color:var(--txt3);font-family:var(--fm);font-size:9px">NAME</th>
+            <th style="text-align:left;padding:.5rem .6rem;color:var(--txt3);font-family:var(--fm);font-size:9px">EMAIL</th>
+            <th style="text-align:left;padding:.5rem .6rem;color:var(--txt3);font-family:var(--fm);font-size:9px">PHONE</th>
+            <th style="text-align:left;padding:.5rem .6rem;color:var(--txt3);font-family:var(--fm);font-size:9px">WALLET</th>
+            <th style="text-align:left;padding:.5rem .6rem;color:var(--txt3);font-family:var(--fm);font-size:9px">EVENT</th>
+            <th style="text-align:left;padding:.5rem .6rem;color:var(--txt3);font-family:var(--fm);font-size:9px">SEAT</th>
+            <th style="text-align:left;padding:.5rem .6rem;color:var(--txt3);font-family:var(--fm);font-size:9px">PAYMENT</th>
+            <th style="text-align:left;padding:.5rem .6rem;color:var(--txt3);font-family:var(--fm);font-size:9px">STATUS</th>
+            <th style="text-align:left;padding:.5rem .6rem;color:var(--txt3);font-family:var(--fm);font-size:9px">DATE</th>
+            <th style="text-align:left;padding:.5rem .6rem;color:var(--txt3);font-family:var(--fm);font-size:9px">ZIP</th>
+            <th style="text-align:left;padding:.5rem .6rem;color:var(--txt3);font-family:var(--fm);font-size:9px">AGE RANGE</th>
+            <th style="text-align:left;padding:.5rem .6rem;color:var(--txt3);font-family:var(--fm);font-size:9px">REFERRAL</th>
+            <th style="text-align:left;padding:.5rem .6rem;color:var(--txt3);font-family:var(--fm);font-size:9px">EMAIL OPT-IN</th>
+            <th style="text-align:left;padding:.5rem .6rem;color:var(--txt3);font-family:var(--fm);font-size:9px">SMS OPT-IN</th>
+            <th style="text-align:left;padding:.5rem .6rem;color:var(--txt3);font-family:var(--fm);font-size:9px">VISITS</th>
+          </tr></thead>
+          <tbody id="cust-tbody"><tr><td colspan="15" class="empty">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="tab-shows" class="tab-panel">
+      <div class="section-header">
+        <div>
+          <div class="card-title-lg">Show P&amp;L</div>
+          <div class="form-hint">Revenue pulled from ticket sales · expenses entered below, saved per show</div>
+        </div>
+        <select class="form-input" id="sf-event-select" style="margin-bottom:0;width:auto" onchange="renderShowFinancials()">
+          <option value="">Select an event…</option>
+        </select>
+      </div>
+      <div id="sf-event-list"></div>
+      <div class="form-hint" style="margin-top:1rem">Aggregate financial figures only — no buyer names or emails appear on this tab.</div>
+    </div>
+
+    <!-- ── ADD EVENT (General Admission only — no seat map for this venue) ── -->
+    <div id="tab-add" class="tab-panel">
+      <div class="card-title-lg" style="margin-bottom:1rem">Add Event — General Admission</div>
+      <div id="add-success" class="info-box info-ok" style="display:none"></div>
+      <div id="add-err" class="err-msg" style="display:none"></div>
+
+      <!-- Step progress -->
+      <div style="display:flex;gap:0;margin-bottom:1.25rem;border:1px solid var(--border);border-radius:var(--radius);overflow:hidden">
+        <div class="ae-step-tab active" id="ae-steptab-1" onclick="aeGoStep(1)" style="flex:1;padding:.6rem .5rem;text-align:center;cursor:pointer;background:var(--goldl);border-right:1px solid var(--border)">
+          <div style="font-size:11px;font-weight:700;color:var(--gold);font-family:var(--fm)">1 · Event Details</div>
+        </div>
+        <div class="ae-step-tab" id="ae-steptab-2" onclick="aeGoStep(2)" style="flex:1;padding:.6rem .5rem;text-align:center;cursor:pointer;background:var(--bg3)">
+          <div style="font-size:11px;font-weight:700;color:var(--txt3);font-family:var(--fm)">2 · Review &amp; Add</div>
+        </div>
+      </div>
+
+      <!-- ══ STEP 1: Event Details ══ -->
+      <div id="ae-step-1">
+        <div id="ae-validation-msg" class="err-msg" style="display:none;margin-bottom:1rem"></div>
+        <div class="form-grid">
+          <div class="form-group span2">
+            <label class="form-label">Event Name *</label>
+            <input class="form-input" id="ae-name" placeholder="e.g. Saturday Night Showcase">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Date *</label>
+            <input class="form-input" type="date" id="ae-date">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Age Restriction</label>
+            <select class="form-input" id="ae-age">
+              <option>All Ages</option><option>18+</option><option>21+</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Doors Open</label>
+            <input class="form-input" type="time" id="ae-doors" value="19:00">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Show Time</label>
+            <input class="form-input" type="time" id="ae-show" value="20:00">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Royalty on Resale (%)</label>
+            <input class="form-input" type="number" id="ae-royalty" value="10" min="0" max="25">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Capacity (max entrants)</label>
+            <input class="form-input" type="number" id="ae-capacity" placeholder="750">
+          </div>
+          <div class="form-group span2">
+            <label class="form-label">Description</label>
+            <textarea class="form-input" id="ae-desc" rows="3" placeholder="Event description for buyers..."></textarea>
+          </div>
+          <div class="form-group span2">
+            <label class="form-label">Genres / Tags</label>
+            <input class="form-input" id="ae-tags" placeholder="Latin, Electronic, DJ">
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:.25rem">
+          <div style="font-size:10px;font-weight:700;color:var(--gold);text-transform:uppercase;letter-spacing:.8px;font-family:var(--fm);margin-bottom:.65rem">⚡ ZeroScalp Anti-Scalping Rules</div>
+          <div class="form-grid">
+            <div class="form-group">
+              <label class="form-label">Transfer / Gift</label>
+              <select class="form-input" id="ae-transfer-enabled">
+                <option value="true">Enabled — buyers can transfer tickets</option>
+                <option value="false">Disabled — no transfers allowed</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Resale Pricing Rule</label>
+              <select class="form-input" id="ae-resale-rule">
+                <option value="open">Open Pricing — no price cap</option>
+                <option value="original_plus_fees">Original Price + Fees — capped resale</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-group" style="margin-top:.75rem;max-width:220px">
+          <label class="form-label">GA Price ($)</label>
+          <input class="form-input" type="number" id="ae-price" placeholder="25.00">
+        </div>
+        <!-- Service Fee field intentionally removed — pending Model C all-in
+             pricing (% of ticket price). Exact percentage not yet set; this
+             stays hidden at 0 until that number is confirmed. -->
+        <input type="hidden" id="ae-fee" value="0">
+
+        <div style="margin-top:1rem">
+          <div class="form-label" style="margin-bottom:.35rem">Tickets On Sale</div>
+          <div class="form-hint" style="margin-bottom:.5rem">Leave blank to put tickets on sale immediately when the event is added.</div>
+          <div class="form-grid">
+            <div class="form-group">
+              <label class="form-label">On Sale Date</label>
+              <input class="form-input" type="date" id="ae-sale-date">
+            </div>
+            <div class="form-group">
+              <label class="form-label">On Sale Time</label>
+              <input class="form-input" type="time" id="ae-sale-time">
+            </div>
+          </div>
+          <div class="form-hint">Buyers can preview the seating chart before this time but cannot purchase tickets.</div>
+        </div>
+
+        <div class="form-hint" style="margin:1rem 0">Club Chaotic is general admission — no seat map configuration needed. Venue is fixed to Club Chaotic for every event created here.</div>
+        <button class="btn btn-ok" onclick="aeStep1Next()">Review &amp; Add Event →</button>
+      </div>
+
+      <!-- ══ STEP 2: Review & Add ══ -->
+      <div id="ae-step-2" style="display:none">
+        <div class="card">
+          <div class="form-label" style="margin-bottom:.5rem">All details confirmed. Review the summary below and click Add Event to make it live.</div>
+          <div id="ae-final-summary" style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:1rem"></div>
+        </div>
+        <div id="ae-final-btns" style="display:flex;gap:8px;margin-top:.5rem">
+          <button class="btn btn-ghost" onclick="aeGoStep(1)">← Back</button>
+          <button class="btn btn-ok" id="ae-add-btn" onclick="addEvent()" style="flex:1">✓ Add Event</button>
+        </div>
+        <div id="ae-post-success-btns" style="display:none;gap:8px;margin-top:.5rem">
+          <button class="btn btn-ghost" onclick="resetEventForm()" style="flex:1">+ Add Another Event</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── RESEND TICKETS ── -->
+    <div id="tab-resend" class="tab-panel">
+      <div class="card-title-lg" style="margin-bottom:1rem">Resend Tickets</div>
+      <div class="form-group">
+        <label class="form-label">Search by Ticket ID, Email, or Buyer Name</label>
+        <input class="form-input" id="resend-search-input" placeholder="CADB-..., name@email.com, or Jane Doe">
+      </div>
+      <button class="btn btn-ok btn-sm" onclick="venueResendSearch()">Search</button>
+      <div id="resend-search-status" class="info-box info-blue" style="display:none;margin-top:1rem"></div>
+
+      <div id="resend-results" style="display:none;margin-top:1rem">
+        <div id="resend-ticket-list"></div>
+        <div class="card" style="margin-top:1rem">
+          <div class="form-group">
+            <label class="form-label">Corrected Name</label>
+            <input class="form-input" id="resend-edit-name" placeholder="Buyer name">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Send To Email</label>
+            <input class="form-input" id="resend-override-email" placeholder="name@email.com">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Phone (optional)</label>
+            <input class="form-input" id="resend-edit-phone" placeholder="(555) 555-5555">
+          </div>
+          <button class="btn btn-ok" id="resend-send-btn" onclick="venueResendTickets()">Save &amp; Resend</button>
+          <div id="resend-send-status" class="info-box" style="display:none;margin-top:.75rem"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── PAYOUTS ── -->
+    <div id="tab-payouts" class="tab-panel">
+      <div class="section-header">
+        <div class="card-title-lg">Resale Payouts</div>
+        <div style="display:flex;gap:6px">
+          <button class="btn btn-ghost btn-sm" id="payout-filter-pending" onclick="filterPayouts('pending')">Pending</button>
+          <button class="btn btn-ghost btn-sm" id="payout-filter-paid" onclick="filterPayouts('paid')">Paid</button>
+          <button class="btn btn-ghost btn-sm" id="payout-filter-all" onclick="filterPayouts('all')">All</button>
+        </div>
+      </div>
+      <div id="payouts-list"><div class="empty">Loading…</div></div>
+    </div>
+
+    <!-- ── EXCEPTION REQUESTS ── -->
+    <div id="tab-exceptions" class="tab-panel">
+      <div class="card-title-lg" style="margin-bottom:1rem">ZeroScalp Exception Requests</div>
+      <div id="exceptions-list"><div class="empty">Loading…</div></div>
+    </div>
+
+    <!-- ── DOOR SCANNER (also reachable from within an authenticated session) ── -->
+    <div id="tab-door" class="tab-panel">
+      <div class="card-title-lg" style="margin-bottom:1rem">Door Scanner</div>
+      <button class="btn btn-ok" onclick="enterDoorScreenFromAdmin()">Open Full-Screen Scanner</button>
+
+      <div class="card-title-lg" style="font-size:13px;margin:1.5rem 0 .5rem">Door Entry PIN</div>
+      <div class="form-hint" style="margin-bottom:.75rem">This PIN gates the standalone scanner reachable from the login screen — it never grants any database access on its own, only entry to the scan-only UI. Changing it is an authenticated admin action, which is why it lives here rather than on the scanner screen itself.</div>
+      <div class="form-group" style="max-width:280px">
+        <label class="form-label">New Door Entry PIN</label>
+        <input class="form-input" id="new-door-pin" placeholder="8 characters, letters + numbers" maxlength="8">
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="changeDoorPin()">Update PIN</button>
+      <div id="door-pin-msg" class="info-box" style="display:none;margin-top:.75rem;max-width:280px"></div>
+    </div>
+
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script>
+// ════════════════════════════════════════════════════════════════════════
+// chaotic_admin v2.3 — Club Chaotic Venue Admin
+// Same shared OCTL project as the public venue file. Real Supabase Auth
+// replaces the old client-side PIN for everything except the Door Scanner
+// (see note above the door panel for why that one's different).
+// ════════════════════════════════════════════════════════════════════════
+
+const SUPABASE_URL = 'https://uruepqyiupmmvwmvjrie.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_3K3JxO9uhq7zUvY0C29tRQ_MBBbTNcd';
+const VERCEL_API    = 'https://octickets-api.vercel.app';
+const VENUE_ID       = 'concerttix';
+let DOOR_PIN        = 'CHANGE-ME'; // set this before handing to door staff
+
+const db = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
+  auth: { persistSession: true, autoRefreshToken: true }
+});
+
+let EVENTS = [];
+let _resendTickets = [];
+let _allPayouts = [];
+let _payoutFilter = 'pending';
+let scanCount = 0;
+let scanLog = [];
+let scanStream = null, scanAnimFrame = null;
+
+// ── LOGIN UI ────────────────────────────────────────────────────────────
+function showAdminForm(){ document.getElementById('admin-entry').style.display='none'; document.getElementById('admin-form').classList.add('visible'); }
+function hideAdminForm(){ document.getElementById('admin-entry').style.display='block'; document.getElementById('admin-form').classList.remove('visible'); }
+function showDoorForm(){ document.getElementById('door-entry').style.display='none'; document.getElementById('door-form').classList.add('visible'); }
+function hideDoorForm(){ document.getElementById('door-entry').style.display='block'; document.getElementById('door-form').classList.remove('visible'); }
+
+function checkDoorPin(){
+  const val = document.getElementById('door-pin').value;
+  const errEl = document.getElementById('door-err');
+  if(val === DOOR_PIN){
+    document.getElementById('login-screen').style.display = 'none';
+    document.getElementById('door-screen').style.display = 'block';
+    startCameraScanner();
+  } else {
+    errEl.textContent = 'Incorrect PIN.';
+    errEl.style.display = 'block';
+  }
+}
+function exitDoorScreen(){
+  stopCameraScanner();
+  document.getElementById('door-screen').style.display = 'none';
+  document.getElementById('login-screen').style.display = 'flex';
+}
+function enterDoorScreenFromAdmin(){
+  document.getElementById('admin-screen').style.display = 'none';
+  document.getElementById('door-screen').style.display = 'block';
+  startCameraScanner();
+}
+
+// ── AUTH ────────────────────────────────────────────────────────────────
+async function doLogin(){
+  const email = document.getElementById('login-email').value.trim();
+  const pass  = document.getElementById('login-pass').value;
+  const errEl = document.getElementById('login-err');
+  const btn   = document.getElementById('login-btn');
+  errEl.style.display = 'none';
+  btn.disabled = true; btn.textContent = 'Signing In…';
+
+  const { data, error } = await db.auth.signInWithPassword({ email, password: pass });
+  if(error){
+    errEl.textContent = error.message;
+    errEl.style.display = 'block';
+    btn.disabled = false; btn.textContent = 'Sign In →';
+    return;
+  }
+
+  // Defense in depth on top of RLS: confirm this user is actually mapped
+  // to this venue (or is a platform/'ALL' admin) before showing anything.
+  const { data: access } = await db.from('admin_access')
+    .select('venue_id')
+    .eq('user_id', data.user.id);
+  const allowed = (access || []).some(a => a.venue_id === VENUE_ID || a.venue_id === 'ALL');
+
+  if(!allowed){
+    await db.auth.signOut();
+    errEl.textContent = 'This account is not authorized for Club Chaotic.';
+    errEl.style.display = 'block';
+    btn.disabled = false; btn.textContent = 'Sign In →';
+    return;
+  }
+
+  document.getElementById('topbar-email').textContent = data.user.email;
+  document.getElementById('login-screen').style.display = 'none';
+  document.getElementById('admin-screen').style.display = 'block';
+  initAdminScreen();
+}
+
+async function doSignOut(){
+  await db.auth.signOut();
+  document.getElementById('admin-screen').style.display = 'none';
+  document.getElementById('login-screen').style.display = 'flex';
+  hideAdminForm();
+}
+
+// ── TABS ────────────────────────────────────────────────────────────────
+function showTab(name){
+  document.querySelectorAll('.tab-panel').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  [...document.querySelectorAll('.tab-btn')].find(b => b.getAttribute('onclick') === `showTab('${name}')`)?.classList.add('active');
+  if(name === 'overview') loadOverview();
+  if(name === 'fangraph') renderFanGraph();
+  if(name === 'royalties') loadRoyalties();
+  if(name === 'customers') loadCustomerData();
+  if(name === 'shows') loadShowFinancials();
+  if(name === 'payouts') loadPayouts();
+  if(name === 'exceptions') loadExceptionRequests();
+}
+
+async function initAdminScreen(){
+  document.getElementById('db-dot').className = 'db-dot ok';
+  document.getElementById('db-status-text').textContent = 'Connected';
+  loadOverview();
+}
+
+// ── OVERVIEW — aggregate per-show operational stats, no buyer data ──────
+let _overviewEventId = null;
+
+async function loadOverview(selectEventId){
+  const { data, error } = await db.from('events').select('*').eq('venue_id', VENUE_ID).order('date', { ascending: true });
+  if(error){ document.getElementById('overview-show-list').innerHTML = `<div class="err-msg">${error.message}</div>`; return; }
+  EVENTS = data || [];
+  if(!EVENTS.length){
+    document.getElementById('overview-show-list').innerHTML = '<div class="empty">No events yet — add one in the Add Event tab.</div>';
+    document.getElementById('overview-metrics').innerHTML = '';
+    return;
+  }
+
+  const now = new Date();
+  const upcoming = EVENTS.filter(e => new Date(e.date) >= now);
+  const past = [...EVENTS].filter(e => new Date(e.date) < now).reverse();
+  if(selectEventId) _overviewEventId = selectEventId;
+  else if(!_overviewEventId) _overviewEventId = (upcoming[0] || past[0])?.id || null;
+
+  const selectedEv = EVENTS.find(e => e.id === _overviewEventId);
+  document.getElementById('overview-show-label').textContent = selectedEv ? `${selectedEv.name} · ${selectedEv.date}` : 'No show selected';
+
+  // Real per-show stats from the tickets table — counts, fans, and actual revenue.
+  let seatsIssued = 0, uniqueFans = 0, revenue = 0, royalties = 0;
+  if(selectedEv){
+    const { data: evTickets } = await db.from('tickets').select('buyer_email,buyer_name,wallet,status,payment,price')
+      .eq('event_id', selectedEv.id).neq('status','held').neq('status','refunded');
+    const t = evTickets || [];
+    seatsIssued = t.length;
+    uniqueFans = new Set(t.map(x => x.buyer_email || x.wallet).filter(Boolean)).size;
+    revenue = t.filter(x => x.payment !== 'Complimentary').reduce((s,x) => s + (x.price||0), 0);
+
+    const { data: evPayouts } = await db.from('payouts').select('listed_price').eq('event_id', selectedEv.id);
+    const royaltyPct = (selectedEv.royalty_percent ?? 10) / 100;
+    royalties = (evPayouts||[]).reduce((s,p) => s + (p.listed_price||0)*royaltyPct, 0);
+  }
+  document.getElementById('overview-metrics').innerHTML = `
+    <div class="card"><div class="form-label">Seats Issued</div><div style="font-size:22px;font-weight:700">${seatsIssued} <span style="font-size:11px;color:var(--txt3)">/ ${selectedEv?.max_entrants ?? '—'}</span></div></div>
+    <div class="card"><div class="form-label">Unique Fans</div><div style="font-size:22px;font-weight:700;color:var(--blue)">${uniqueFans}</div></div>
+    <div class="card"><div class="form-label">Primary Revenue</div><div style="font-size:22px;font-weight:700;color:var(--gold)">$${revenue.toFixed(2)}</div></div>
+    <div class="card"><div class="form-label">Auto Royalties</div><div style="font-size:22px;font-weight:700;color:var(--blue)">$${royalties.toFixed(2)}</div></div>
+    <div class="card"><div class="form-label">Status</div><div style="font-size:14px;font-weight:700;margin-top:4px">${selectedEv && new Date(selectedEv.date) >= now ? 'Upcoming' : 'Past'}</div></div>`;
+
+  const showRow = ev => {
+    const isSel = ev.id === _overviewEventId;
+    return `<div class="card" onclick="loadOverview('${ev.id}')" style="cursor:pointer;background:${isSel?'var(--goldl)':'var(--bg3)'};border-color:${isSel?'var(--goldb)':'var(--border)'}">
+      <div style="font-weight:${isSel?700:600};font-size:13px">${ev.name}</div>
+      <div style="font-family:var(--fm);font-size:10px;color:var(--txt3)">${ev.date}</div>
+    </div>`;
+  };
+  document.getElementById('overview-show-list').innerHTML = upcoming.map(showRow).join('') + past.map(showRow).join('');
+}
+
+// ── ADD EVENT (General Admission) ──────────────────────────────────────
+// ── ADD EVENT WIZARD ──────────────────────────────────────────────────
+let _aeMeta = null;
+
+function aeGoStep(n){
+  if(n > 1 && !_aeMeta){ aeStep1Next(); return; }
+  for(let i=1;i<=2;i++){
+    const panel = document.getElementById('ae-step-'+i);
+    const tab   = document.getElementById('ae-steptab-'+i);
+    if(panel) panel.style.display = i===n ? 'block' : 'none';
+    if(tab){
+      tab.style.background = i===n ? 'var(--goldl)' : 'var(--bg3)';
+      tab.querySelector('div').style.color = i===n ? 'var(--gold)' : (i<n ? 'var(--ok)' : 'var(--txt3)');
+    }
+  }
+  if(n===2) aePopulateSummary();
+}
+
+function validateAE(){
+  const msgs = [];
+  if(!document.getElementById('ae-name').value.trim()) msgs.push('Event name required.');
+  if(!document.getElementById('ae-date').value) msgs.push('Date required.');
+  const price = parseFloat(document.getElementById('ae-price').value);
+  if(!price || price<=0) msgs.push('Ticket price required.');
+  return msgs;
+}
+
+function aeStep1Next(){
+  const errs = validateAE();
+  const vm = document.getElementById('ae-validation-msg');
+  if(errs.length){ vm.textContent = errs.join(' '); vm.style.display='block'; vm.scrollIntoView({behavior:'smooth',block:'nearest'}); return; }
+  vm.style.display = 'none';
+  _aeMeta = aeBuildMeta();
+  aeGoStep(2);
+}
+
+function aeBuildMeta(){
+  const name = document.getElementById('ae-name').value.trim();
+  const date = document.getElementById('ae-date').value;
+  const saleDate = document.getElementById('ae-sale-date').value;
+  const saleTime = document.getElementById('ae-sale-time').value;
+  return {
+    id: name.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'') + '-' + date,
+    name, date,
+    doors_open: document.getElementById('ae-doors').value || null,
+    show_time:  document.getElementById('ae-show').value || null,
+    age_restriction: document.getElementById('ae-age').value || 'All Ages',
+    royalty_percent: parseFloat(document.getElementById('ae-royalty').value) || 10,
+    description: document.getElementById('ae-desc').value.trim() || null,
+    genres: (document.getElementById('ae-tags').value || '').split(',').map(t=>t.trim()).filter(Boolean).join(','),
+    tier1_price: parseFloat(document.getElementById('ae-price').value) || null,
+    tier1_fee:   parseFloat(document.getElementById('ae-fee').value) || 0,
+    max_entrants: parseInt(document.getElementById('ae-capacity').value) || null,
+    sale_start: saleDate ? (saleDate + 'T' + (saleTime||'00:00') + ':00') : null,
+    transfer_enabled: document.getElementById('ae-transfer-enabled').value !== 'false',
+    resale_rule: document.getElementById('ae-resale-rule').value || 'open',
+  };
+}
+
+function aePopulateSummary(){
+  const el = document.getElementById('ae-final-summary');
+  const m = _aeMeta;
+  if(!el || !m) return;
+  el.innerHTML = `
+    <div style="font-size:10px;font-weight:700;color:var(--txt3);text-transform:uppercase;letter-spacing:1px;font-family:var(--fm);margin-bottom:.6rem">Event Summary</div>
+    <div class="t-row"><span class="t-label">Event</span><span class="t-val">${m.name}</span></div>
+    <div class="t-row"><span class="t-label">Date</span><span class="t-val">${m.date} · Doors ${m.doors_open||'—'} · Show ${m.show_time||'—'}</span></div>
+    <div class="t-row"><span class="t-label">Age</span><span class="t-val">${m.age_restriction}</span></div>
+    <div class="t-row"><span class="t-label">Ticket Price</span><span class="t-val" style="color:var(--gold)">$${m.tier1_price} · General Admission</span></div>
+    <div class="t-row"><span class="t-label">Capacity</span><span class="t-val">${m.max_entrants ?? '—'} tickets</span></div>
+    <div class="t-row"><span class="t-label">Royalty on Resale</span><span class="t-val">${m.royalty_percent}%</span></div>
+    <div class="t-row"><span class="t-label">On Sale</span><span class="t-val">${m.sale_start ? m.sale_start.replace('T',' ') : 'Immediately'}</span></div>
+    <div style="border-top:1px solid var(--border);margin:.5rem 0"></div>
+    <div style="font-size:9px;font-weight:700;color:var(--gold);text-transform:uppercase;letter-spacing:1px;font-family:var(--fm);margin-bottom:.4rem">⚡ ZeroScalp Config</div>
+    <div class="t-row"><span class="t-label">Transfer / Gift</span><span class="t-val" style="color:${m.transfer_enabled?'var(--okd)':'var(--redd)'}">${m.transfer_enabled?'Enabled':'Disabled'}</span></div>
+    <div class="t-row" style="border-bottom:none"><span class="t-label">Resale Rule</span><span class="t-val" style="color:${m.resale_rule==='original_plus_fees'?'var(--amberd)':'var(--txt)'}">${m.resale_rule==='original_plus_fees'?'Capped — Original + Fees':'Open Pricing'}</span></div>`;
+}
+
+async function addEvent(){
+  const errEl = document.getElementById('add-err');
+  const okEl  = document.getElementById('add-success');
+  errEl.style.display = 'none'; okEl.style.display = 'none';
+  if(!_aeMeta){ aeGoStep(1); return; }
+  const m = _aeMeta;
+
+  const btn = document.getElementById('ae-add-btn');
+  if(btn){ btn.disabled = true; btn.textContent = 'Adding Event…'; btn.style.opacity = '.7'; }
+
+  const { error: evErr } = await db.from('events').insert({
+    id: m.id, name: m.name, date: m.date,
+    doors_open: m.doors_open, show_time: m.show_time,
+    age_restriction: m.age_restriction,
+    description: m.description, genres: m.genres, royalty_percent: m.royalty_percent,
+    tier1_price: m.tier1_price, tier1_fee: m.tier1_fee,
+    max_entrants: m.max_entrants, sale_start: m.sale_start,
+    venue_id: VENUE_ID, flyer: 'flyer.jpg',
+  });
+  if(evErr){
+    errEl.textContent = evErr.message; errEl.style.display = 'block';
+    if(btn){ btn.disabled = false; btn.textContent = '✓ Add Event'; btn.style.opacity = '1'; }
+    return;
+  }
+
+  // Real dropdown values now — previously hardcoded true/'open' regardless of input.
+  const { error: cfgErr } = await db.from('event_config').insert({
+    event_id: m.id, event_name: m.name,
+    transfer_enabled: m.transfer_enabled, resale_rule: m.resale_rule,
+  });
+  if(cfgErr) console.warn('event_config insert error:', cfgErr.message);
+
+  try {
+    await fetch(VERCEL_API + '/api/pin-event-config', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ configBlob: { ...m, venue_id: VENUE_ID } }),
+    });
+  } catch(e){ console.warn('pin-event-config error:', e.message); }
+
+  okEl.textContent = `✓ Event "${m.name}" added.`;
+  okEl.style.display = 'block';
+  document.getElementById('ae-final-btns').style.display = 'none';
+  document.getElementById('ae-post-success-btns').style.display = 'flex';
+  loadOverview();
+}
+
+function resetEventForm(){
+  ['ae-name','ae-date','ae-desc','ae-tags','ae-price','ae-capacity','ae-sale-date','ae-sale-time'].forEach(id=>{
+    const el = document.getElementById(id); if(el) el.value = '';
+  });
+  document.getElementById('ae-doors').value = '19:00';
+  document.getElementById('ae-show').value = '20:00';
+  document.getElementById('ae-royalty').value = '10';
+  document.getElementById('ae-age').value = 'All Ages';
+  document.getElementById('ae-transfer-enabled').value = 'true';
+  document.getElementById('ae-resale-rule').value = 'open';
+  _aeMeta = null;
+  document.getElementById('add-success').style.display = 'none';
+  document.getElementById('ae-final-btns').style.display = 'flex';
+  document.getElementById('ae-post-success-btns').style.display = 'none';
+  const addBtn = document.getElementById('ae-add-btn');
+  if(addBtn){ addBtn.disabled = false; addBtn.textContent = '✓ Add Event'; addBtn.style.opacity = '1'; }
+  aeGoStep(1);
+}
+
+// ── RESEND TICKETS ──────────────────────────────────────────────────────
+async function venueResendSearch(){
+  const query = (document.getElementById('resend-search-input').value || '').trim();
+  const statusEl = document.getElementById('resend-search-status');
+  const resultsEl = document.getElementById('resend-results');
+  const listEl = document.getElementById('resend-ticket-list');
+
+  if(!query){
+    statusEl.textContent = '⚠ Enter a name, email, or ticket ID.';
+    statusEl.className = 'info-box info-amber'; statusEl.style.display = 'block';
+    resultsEl.style.display = 'none'; return;
+  }
+  statusEl.textContent = 'Searching…'; statusEl.className = 'info-box info-blue';
+  statusEl.style.display = 'block'; resultsEl.style.display = 'none';
+
+  const isEmail = query.includes('@');
+  const isTicketId = query.toUpperCase().startsWith('CADB-');
+  const cols = 'id, event_id, event_name, seat, status, payment, buyer_email, buyer_name, purchased_at';
+  let tickets = [];
+
+  if(isTicketId){
+    const { data } = await db.from('tickets').select(cols).eq('id', query.toUpperCase());
+    tickets = data || [];
+  } else if(isEmail){
+    const { data } = await db.from('tickets').select(cols).eq('buyer_email', query.toLowerCase()).neq('status','refunded');
+    tickets = data || [];
+  } else {
+    const { data } = await db.from('tickets').select(cols).ilike('buyer_name', `%${query}%`).neq('status','refunded').order('purchased_at',{ascending:false}).limit(20);
+    tickets = data || [];
+  }
+
+  _resendTickets = tickets;
+  if(!tickets.length){
+    statusEl.textContent = 'No matching tickets found.'; statusEl.className = 'info-box info-amber';
+    resultsEl.style.display = 'none'; return;
+  }
+  statusEl.style.display = 'none'; resultsEl.style.display = 'block';
+  listEl.innerHTML = tickets.map(t => `
+    <div class="card">
+      <div style="font-weight:700;font-size:13px">${t.event_name || t.event_id} — ${t.seat || 'GA'}</div>
+      <div style="font-family:var(--fm);font-size:11px;color:var(--txt3)">${t.id} · ${t.status} · ${t.buyer_name || '—'} (${t.buyer_email || '—'})</div>
+    </div>
+  `).join('');
+  document.getElementById('resend-edit-name').value = tickets[0].buyer_name || '';
+  document.getElementById('resend-override-email').value = tickets[0].buyer_email || '';
+}
+
+async function venueResendTickets(){
+  const name = document.getElementById('resend-edit-name').value.trim();
+  const overrideEmail = document.getElementById('resend-override-email').value.trim();
+  const phone = document.getElementById('resend-edit-phone').value.trim();
+  const statusEl = document.getElementById('resend-send-status');
+  const btn = document.getElementById('resend-send-btn');
+
+  if(!overrideEmail.includes('@')){
+    statusEl.textContent = '⚠ Enter a valid email.'; statusEl.className = 'info-box info-amber'; statusEl.style.display='block';
+    return;
+  }
+  if(!_resendTickets.length){
+    statusEl.textContent = '⚠ Search first.'; statusEl.className = 'info-box info-amber'; statusEl.style.display='block';
+    return;
+  }
+  btn.disabled = true; btn.textContent = 'Sending…';
+
+  try {
+    await Promise.all(_resendTickets.map(t =>
+      db.from('tickets').update({ buyer_name: name || null, buyer_email: overrideEmail.toLowerCase() }).eq('id', t.id)
+    ));
+
+    const res = await fetch(`${VERCEL_API}/api/resend-tickets`, {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        email: overrideEmail,
+        ticketIds: _resendTickets.map(t => t.id),
+        venueUrl: 'https://concerttix.eth.limo',
+        isManagerResend: true,
+      }),
+    });
+    const data = await res.json();
+    if(data.success || res.ok){
+      statusEl.textContent = `✓ Sent to ${overrideEmail} for ${_resendTickets.length} ticket(s).`;
+      statusEl.className = 'info-box info-ok';
+    } else {
+      statusEl.textContent = `✗ ${data.error || 'Send failed.'}`;
+      statusEl.className = 'info-box info-amber';
+    }
+  } catch(e){
+    statusEl.textContent = `✗ ${e.message}`; statusEl.className = 'info-box info-amber';
+  }
+  statusEl.style.display = 'block';
+  btn.disabled = false; btn.textContent = 'Save & Resend';
+}
+
+// ── PAYOUTS ─────────────────────────────────────────────────────────────
+async function loadPayouts(){
+  const el = document.getElementById('payouts-list');
+  const { data, error } = await db.from('payouts').select('*').order('created_at',{ascending:false});
+  if(error){ el.innerHTML = `<div class="err-msg">${error.message}</div>`; return; }
+  _allPayouts = data || [];
+  filterPayouts(_payoutFilter);
+}
+
+function filterPayouts(filter){
+  _payoutFilter = filter;
+  ['pending','paid','all'].forEach(f => {
+    document.getElementById('payout-filter-'+f)?.classList.toggle('active', f === filter);
+  });
+  const el = document.getElementById('payouts-list');
+  const rows = filter === 'all' ? _allPayouts : _allPayouts.filter(p => p.payout_status === filter);
+  if(!rows.length){ el.innerHTML = '<div class="empty">No payouts in this view.</div>'; return; }
+  el.innerHTML = rows.map(p => `
+    <div class="card" style="display:flex;justify-content:space-between;align-items:center">
+      <div>
+        <div style="font-weight:700;font-size:13px">${p.event_name || p.event_id} — ${p.seat || 'GA'}</div>
+        <div style="font-family:var(--fm);font-size:11px;color:var(--txt3)">${p.buyer_name || '—'} · ${p.payout_method} → ${p.payout_handle} · $${p.listed_price ?? p.price ?? '—'}</div>
+      </div>
+      ${p.payout_status === 'pending' ? `<button class="btn btn-ok btn-sm" onclick="markPayoutPaid('${p.id}')">Mark Paid</button>` : `<span class="info-box info-ok" style="margin:0;padding:.3rem .6rem;font-size:10px">PAID</span>`}
+    </div>
+  `).join('');
+}
+
+async function markPayoutPaid(id){
+  await db.from('payouts').update({ payout_status: 'paid', payout_paid_at: new Date().toISOString() }).eq('id', id);
+  loadPayouts();
+}
+
+// ── EXCEPTION REQUESTS ─────────────────────────────────────────────────
+async function loadExceptionRequests(){
+  const el = document.getElementById('exceptions-list');
+  const { data, error } = await db.from('exception_requests').select('*').in('status',['pending','approved','denied']).order('id',{ascending:false});
+  if(error){ el.innerHTML = `<div class="err-msg">${error.message}</div>`; return; }
+  if(!data || !data.length){ el.innerHTML = '<div class="empty">No exception requests on record.</div>'; return; }
+
+  el.innerHTML = data.map(r => {
+    const ev = EVENTS.find(e => e.id === r.event_id);
+    const statusColor = { pending:'var(--amberd)', approved:'var(--okd)', denied:'var(--redd)' }[r.status] || 'var(--txt3)';
+    const canAct = r.status === 'pending' && r.otp_verified;
+    return `<div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:.4rem">
+        <div>
+          <div style="font-weight:700;font-size:12px">${ev?.name || r.event_id}</div>
+          <div style="font-family:var(--fm);font-size:10px;color:var(--txt3)">${r.ticket_id}</div>
+        </div>
+        <span style="font-size:9px;font-weight:700;color:${statusColor};font-family:var(--fm);text-transform:uppercase">${r.status}</span>
+      </div>
+      <div style="font-family:var(--fm);font-size:11px;color:var(--txt3);margin-bottom:.4rem">From: ${r.requestor_phone} · To: ${r.recipient_name||'—'} (${r.recipient_phone||'—'})</div>
+      ${r.reason ? `<div style="font-family:var(--fm);font-size:11px;color:var(--txt3);font-style:italic;margin-bottom:.4rem">"${r.reason}"</div>` : ''}
+      ${!r.otp_verified ? '<div class="info-box info-blue" style="font-size:10px">⏳ Awaiting identity verification.</div>' : ''}
+      ${canAct ? `<div style="display:flex;gap:8px;margin-top:.5rem">
+        <button class="btn btn-ok btn-sm" style="flex:1" onclick="venueApproveException('${r.id}',this)">✓ Approve</button>
+        <button class="btn btn-danger btn-sm" style="flex:1" onclick="venueDenyException('${r.id}',this)">✗ Deny</button>
+      </div>` : ''}
+    </div>`;
+  }).join('');
+}
+
+async function venueApproveException(requestId, btn){
+  if(!confirm('Approve this exception transfer request?')) return;
+  if(btn){ btn.disabled = true; btn.textContent = 'Approving…'; }
+  try {
+    const res = await fetch(VERCEL_API + '/api/zeroscalp', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ action:'approve_exception', request_id: requestId }),
+    });
+    const data = await res.json();
+    if(data.approved){ loadExceptionRequests(); }
+    else { alert('Approval failed: ' + (data.error || 'Unknown error')); if(btn){ btn.disabled=false; btn.textContent='✓ Approve'; } }
+  } catch(e){ alert('Error: ' + e.message); if(btn){ btn.disabled=false; btn.textContent='✓ Approve'; } }
+}
+
+async function venueDenyException(requestId, btn){
+  const notes = prompt('Reason for denial (optional):') || '';
+  if(btn){ btn.disabled = true; btn.textContent = 'Denying…'; }
+  try {
+    const res = await fetch(VERCEL_API + '/api/zeroscalp', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ action:'deny_exception', request_id: requestId, reviewer_notes: notes }),
+    });
+    const data = await res.json();
+    if(data.denied || res.ok){ loadExceptionRequests(); }
+    else { alert('Denial failed: ' + (data.error || 'Unknown error')); if(btn){ btn.disabled=false; btn.textContent='✗ Deny'; } }
+  } catch(e){ alert('Error: ' + e.message); if(btn){ btn.disabled=false; btn.textContent='✗ Deny'; } }
+}
+
+// ── DOOR SCANNER (camera) ──────────────────────────────────────────────
+async function startCameraScanner(){
+  const video = document.getElementById('scan-video');
+  try {
+    scanStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+    video.srcObject = scanStream;
+    scanAnimFrame = requestAnimationFrame(scanFrameLoop);
+  } catch(e){
+    document.getElementById('scan-inner').textContent = 'Camera error: ' + e.message;
+  }
+}
+function stopCameraScanner(){
+  if(scanStream){ scanStream.getTracks().forEach(t => t.stop()); scanStream = null; }
+  if(scanAnimFrame) cancelAnimationFrame(scanAnimFrame);
+}
+function scanFrameLoop(){
+  const video = document.getElementById('scan-video');
+  if(video.readyState === video.HAVE_ENOUGH_DATA){
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    if(window.jsQR){
+      const code = jsQR(imageData.data, imageData.width, imageData.height);
+      if(code?.data){ handleScannedQR(code.data); return; }
+    }
+  }
+  scanAnimFrame = requestAnimationFrame(scanFrameLoop);
+}
+async function handleScannedQR(payload){
+  if(!payload) return;
+  stopCameraScanner();
+  const resultEl = document.getElementById('scan-result');
+  const innerEl = document.getElementById('scan-inner');
+  innerEl.innerHTML = '<div>⏳ Validating…</div>';
+  try {
+    const resp = await fetch(VERCEL_API + '/api/validate-ticket', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ token: payload, eventId: null }),
+    });
+    const data = await resp.json();
+    if(data.valid){
+      scanCount++; document.getElementById('scan-count').textContent = scanCount;
+      resultEl.className = 'scan-result scan-valid';
+      innerEl.innerHTML = `<div><div style="font-size:48px">✅</div><div style="font-size:24px;font-weight:900;color:var(--okd)">VALID</div><div>${data.ticket?.seat||'General Admission'}</div></div>`;
+    } else if(data.ticket_status === 'transfer_pending'){
+      resultEl.className = 'scan-result scan-invalid';
+      innerEl.innerHTML = `<div><div style="font-size:48px">⛔</div><div style="font-size:20px;font-weight:900;color:var(--gold)">TRANSFER HOLD</div><div>Entry not permitted</div></div>`;
+    } else {
+      resultEl.className = 'scan-result scan-invalid';
+      innerEl.innerHTML = `<div><div style="font-size:48px">❌</div><div style="font-size:24px;font-weight:900;color:var(--redd)">INVALID</div><div>${data.reason||'Invalid ticket'}</div></div>`;
+    }
+    setTimeout(() => { resultEl.className = 'scan-result'; innerEl.textContent = 'Point camera at QR code'; startCameraScanner(); }, 3000);
+  } catch(e){
+    innerEl.innerHTML = `<div>⚠️ Network error: ${e.message}</div>`;
+    setTimeout(() => startCameraScanner(), 3000);
+  }
+}
+
+// ── FAN GRAPH — revenue by show + ticket provenance search ─────────────
+let _fanGraphEventId = null;
+
+async function renderFanGraph(selectEventId){
+  if(selectEventId !== undefined) _fanGraphEventId = selectEventId;
+  const filterEvent = _fanGraphEventId;
+
+  const breakdownEl = document.getElementById('fg-breakdown');
+  if(!EVENTS.length){
+    const { data } = await db.from('events').select('*').eq('venue_id', VENUE_ID);
+    EVENTS = data || [];
+  }
+  const rows = await Promise.all(EVENTS.map(async ev => {
+    const { data: t } = await db.from('tickets').select('payment,status,price,fee').eq('event_id', ev.id).neq('status','held').neq('status','refunded');
+    const tickets = t || [];
+    const comps = tickets.filter(x => x.payment === 'Complimentary');
+    const paid = tickets.filter(x => x.payment !== 'Complimentary');
+    const revenue = paid.reduce((s,x) => s + (x.price||0) + (x.fee||0), 0);
+    return { ev, count: tickets.length, paidCount: paid.length, compCount: comps.length, revenue, capacity: ev.max_entrants || 750 };
+  }));
+
+  breakdownEl.innerHTML = rows.map(r => {
+    const pct = r.capacity ? Math.round(r.count / r.capacity * 100) : 0;
+    const isSel = r.ev.id === filterEvent;
+    return `<div class="card" onclick="renderFanGraph('${r.ev.id}')" style="cursor:pointer;background:${isSel?'var(--goldl)':'var(--bg3)'};border-color:${isSel?'var(--goldb)':'var(--border)'}">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start">
+        <div><div style="font-weight:700;font-size:13px">${r.ev.name}</div><div style="font-family:var(--fm);font-size:10px;color:var(--txt3)">${r.ev.date}</div></div>
+        <div style="display:flex;gap:1rem;text-align:right">
+          <div><div class="form-label" style="margin-bottom:2px">Revenue</div><div style="font-size:13px;font-weight:700;color:var(--amberd)">$${r.revenue.toFixed(2)}</div></div>
+          <div><div class="form-label" style="margin-bottom:2px">Paid</div><div style="font-size:13px;font-weight:700">${r.paidCount}</div></div>
+          <div><div class="form-label" style="margin-bottom:2px">Comps</div><div style="font-size:13px;font-weight:700;color:var(--gold)">${r.compCount}</div></div>
+        </div>
+      </div>
+      <div style="background:var(--bg);border-radius:3px;height:6px;overflow:hidden;margin-top:.5rem"><div style="background:var(--gold);height:100%;width:${Math.min(pct,100)}%"></div></div>
+      <div class="form-hint">${pct}% capacity · ${r.count} of ${r.capacity}</div>
+    </div>`;
+  }).join('');
+
+  const provLabel = document.getElementById('fg-provenance-label');
+  if(provLabel) provLabel.textContent = filterEvent ? `Showing: ${EVENTS.find(e=>e.id===filterEvent)?.name||''}` : 'All shows';
+
+  const search = (document.getElementById('fg-search')?.value || '').trim();
+  const paymentFilter = document.getElementById('fg-payment')?.value || '';
+  const provEl = document.getElementById('fg-provenance');
+
+  if(!search && !filterEvent){
+    provEl.innerHTML = '<div class="empty">Select a show above or search a ticket ID/buyer name to see provenance.</div>';
+    return;
+  }
+
+  const cols = 'id,event_id,event_name,seat,status,payment,buyer_name,buyer_email,purchased_at,price';
+  let q = db.from('tickets').select(cols).neq('status','held');
+  if(filterEvent) q = q.eq('event_id', filterEvent);
+  if(search){
+    const isId = search.toUpperCase().startsWith('CADB-');
+    q = isId
+      ? q.ilike('id', `%${search.toUpperCase()}%`)
+      : q.or(`buyer_name.ilike.%${search}%,buyer_email.ilike.%${search}%,seat.ilike.%${search}%`);
+  }
+  if(paymentFilter) q = q.eq('payment', paymentFilter);
+  const { data: found } = await q.order('purchased_at',{ascending:false}).limit(50);
+
+  if(!found || !found.length){
+    provEl.innerHTML = filterEvent && !search && !paymentFilter
+      ? '<div class="empty">No tickets sold for this show yet.</div>'
+      : '<div class="empty">No tickets match. Try clearing filters or search a ticket ID above.</div>';
+    return;
+  }
+
+  provEl.innerHTML = found.map(t => `
+    <div class="card" style="margin-bottom:.4rem">
+      <div style="font-weight:700;font-size:12px">${t.event_name || t.event_id} — ${t.seat || 'GA'}</div>
+      <div class="form-hint">${t.id} · Original purchase · ${t.purchased_at ? new Date(t.purchased_at).toLocaleDateString() : 'Recently'} · $${(t.price||0).toFixed(2)} via ${t.payment||'Card'} · ${t.buyer_name || 'Ticket Holder'}${t.status!=='valid'?' · <span style="color:var(--amberd)">'+t.status+'</span>':''}</div>
+    </div>`).join('');
+}
+
+// ── ROYALTY REVENUE — per-event royalty %, now a real column instead of a flat hardcoded rate ──
+async function loadRoyalties(){
+  const { data, error } = await db.from('payouts').select('listed_price,event_id,event_name,seat,payout_status').order('created_at',{ascending:false});
+  if(error){ document.getElementById('royalty-list').innerHTML = `<div class="err-msg">${error.message}</div>`; return; }
+  const rows = data || [];
+  if(!EVENTS.length){ const { data: evData } = await db.from('events').select('*').eq('venue_id', VENUE_ID); EVENTS = evData || []; }
+  const royaltyPct = eventId => (EVENTS.find(e => e.id === eventId)?.royalty_percent ?? 10) / 100;
+
+  const volume = rows.reduce((s,r) => s + (r.listed_price || 0), 0);
+  const royalties = rows.reduce((s,r) => s + (r.listed_price||0) * royaltyPct(r.event_id), 0);
+  document.getElementById('roy-resales').textContent = rows.length;
+  document.getElementById('roy-volume').textContent = '$' + volume.toFixed(2);
+  document.getElementById('roy-collected').textContent = '$' + royalties.toFixed(2);
+  document.getElementById('royalty-list').innerHTML = rows.length ? rows.map(r => {
+    const pct = royaltyPct(r.event_id);
+    return `<div class="card" style="display:flex;justify-content:space-between">
+      <div>${r.event_name || '—'} — ${r.seat || 'GA'} <span class="form-hint" style="display:inline">(${(pct*100).toFixed(0)}%)</span></div>
+      <div style="color:var(--blue);font-weight:700">+$${((r.listed_price||0)*pct).toFixed(2)}</div>
+    </div>`;
+  }).join('') : '<div class="empty">No resales on record.</div>';
+}
+
+// ── CUSTOMERS ────────────────────────────────────────────────────────────
+let _customerData = [];
+
+async function loadCustomerData(){
+  const evFilter = document.getElementById('cust-event-filter');
+  if(evFilter && evFilter.options.length <= 1){
+    EVENTS.forEach(ev => { const o = document.createElement('option'); o.value = ev.id; o.textContent = ev.name; evFilter.appendChild(o); });
+  }
+  const { data: tickets, error } = await db.from('tickets')
+    .select('buyer_email,buyer_name,event_id,event_name,seat,payment,purchased_at,status')
+    .neq('status','held').neq('status','refunded').order('purchased_at',{ascending:false});
+  if(error){ document.getElementById('cust-tbody').innerHTML = `<tr><td colspan="15" class="err-msg">${error.message}</td></tr>`; return; }
+
+  const emails = [...new Set((tickets||[]).map(t => t.buyer_email).filter(Boolean))];
+  let buyers = [];
+  if(emails.length){
+    const { data: b } = await db.from('buyers').select('name,email,phone,wallet,zip_code,age_range,referral_source,opt_in_email,opt_in_sms,visit_count').in('email', emails);
+    buyers = b || [];
+  }
+  const buyerMap = {};
+  buyers.forEach(b => buyerMap[b.email] = b);
+  _customerData = (tickets||[]).map(t => ({ ...t, buyer: buyerMap[t.buyer_email] || { name: t.buyer_name, email: t.buyer_email } }));
+  renderCustomerList();
+}
+
+function renderCustomerList(){
+  const tbody = document.getElementById('cust-tbody');
+  const filter = document.getElementById('cust-event-filter')?.value || '';
+  const data = _customerData.filter(t => !filter || t.event_id === filter);
+
+  const uniqueEmails = new Set(data.map(t => t.buyer_email).filter(Boolean));
+  document.getElementById('cust-total').textContent = uniqueEmails.size;
+  document.getElementById('cust-email-count').textContent = new Set(data.filter(t=>t.buyer?.email).map(t=>t.buyer_email)).size;
+  document.getElementById('cust-phone-count').textContent = new Set(data.filter(t=>t.buyer?.phone).map(t=>t.buyer_email)).size;
+
+  tbody.innerHTML = data.length ? data.map(t => {
+    const b = t.buyer || {};
+    const dt = t.purchased_at ? new Date(t.purchased_at).toLocaleDateString() : '—';
+    const statusColor = t.status==='refunded' ? 'var(--redd)' : t.status==='transferred' ? 'var(--amberd)' : t.status==='scanned' ? 'var(--okd)' : 'var(--txt3)';
+    return `<tr style="border-bottom:1px solid var(--border2)">
+      <td style="padding:.5rem .6rem">${b.name || t.buyer_name || '—'}</td>
+      <td style="padding:.5rem .6rem;font-family:var(--fm);font-size:10px">${b.email || '—'}</td>
+      <td style="padding:.5rem .6rem;font-family:var(--fm);font-size:10px">${b.phone || '—'}</td>
+      <td style="padding:.5rem .6rem;font-family:var(--fm);font-size:10px;color:var(--txt3)">${b.wallet ? b.wallet.slice(0,6)+'…'+b.wallet.slice(-4) : '—'}</td>
+      <td style="padding:.5rem .6rem">${t.event_name || t.event_id}</td>
+      <td style="padding:.5rem .6rem">${t.seat || 'GA'}</td>
+      <td style="padding:.5rem .6rem">${t.payment || '—'}</td>
+      <td style="padding:.5rem .6rem;color:${statusColor}">${t.status || '—'}</td>
+      <td style="padding:.5rem .6rem;font-family:var(--fm);font-size:10px;color:var(--txt3)">${dt}</td>
+      <td style="padding:.5rem .6rem;font-family:var(--fm);font-size:10px">${b.zip_code || '—'}</td>
+      <td style="padding:.5rem .6rem">${b.age_range || '—'}</td>
+      <td style="padding:.5rem .6rem">${b.referral_source || '—'}</td>
+      <td style="padding:.5rem .6rem">${b.opt_in_email ? '✓' : '—'}</td>
+      <td style="padding:.5rem .6rem">${b.opt_in_sms ? '✓' : '—'}</td>
+      <td style="padding:.5rem .6rem;text-align:center">${b.visit_count || 1}</td>
+    </tr>`;
+  }).join('') : '<tr><td colspan="15" class="empty">No customer data yet.</td></tr>';
+}
+
+function exportCustomersCSV(){
+  const filter = document.getElementById('cust-event-filter')?.value || '';
+  const data = _customerData.filter(t => !filter || t.event_id === filter);
+  if(!data.length){ alert('No customer data to export.'); return; }
+
+  const headers = ['Name','Email','Phone','Wallet','Event','Seat','Payment','Status','Date','ZIP','Age Range','Referral Source','Email Opt-in','SMS Opt-in','Visit Count'];
+  const dataRows = data.map(t => {
+    const b = t.buyer || {};
+    return [
+      b.name || t.buyer_name || '',
+      b.email || t.buyer_email || '',
+      b.phone || '',
+      b.wallet || '',
+      t.event_name || t.event_id || '',
+      t.seat || '',
+      t.payment || '',
+      t.status || '',
+      t.purchased_at ? new Date(t.purchased_at).toLocaleDateString('en-US') : '',
+      b.zip_code || '',
+      b.age_range || '',
+      b.referral_source || '',
+      b.opt_in_email ? 'Yes' : 'No',
+      b.opt_in_sms ? 'Yes' : 'No',
+      b.visit_count || '',
+    ];
+  });
+
+  const evName = filter ? (EVENTS.find(e=>e.id===filter)?.name || filter) : 'All-Events';
+  const filename = 'Club-Chaotic-Customers-' + evName.replace(/[^a-z0-9]/gi,'-') + '-' + new Date().toISOString().slice(0,10);
+
+  if(typeof XLSX !== 'undefined'){
+    // Real .xlsx — works in every locale, no delimiter/import-wizard issues.
+    const ws = XLSX.utils.aoa_to_sheet([headers, ...dataRows]);
+    const range = XLSX.utils.decode_range(ws['!ref']);
+    for(let c = range.s.c; c <= range.e.c; c++){
+      const cell = ws[XLSX.utils.encode_cell({r:0, c})];
+      if(cell) cell.s = { font: { bold: true } };
+    }
+    ws['!cols'] = headers.map((h,i) => ({ wch: Math.min(Math.max(h.length, ...dataRows.map(r => String(r[i]??'').length)) + 2, 50) }));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Customers');
+    XLSX.writeFile(wb, filename + '.xlsx');
+  } else {
+    // Fallback only if SheetJS somehow failed to load
+    const esc = v => `"${String(v??'').replace(/"/g,'""')}"`;
+    const csv = '\uFEFF' + [headers, ...dataRows].map(r => r.map(esc).join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename + '.csv';
+    a.click();
+  }
+}
+
+// ── SHOW P&L — settlement-engine logic ──────────────────────────────────
+// Box office NBOR is the ONLY thing that feeds the artist split. F&B/Merch/
+// Other are tracked but isolated — venue keeps 100% of those, always.
+// Split-point formula (locked, Option B): promoter profit % applies to
+// expenses + guarantee combined, not expenses alone.
+const SF_STRIPE_RATE = 0.029, SF_STRIPE_FIXED = 0.30;
+let _sfData = {};
+let _sfTickets = {}; // eventId -> raw ticket rows, cached per session
+
+async function loadShowFinancials(){
+  if(!EVENTS.length){ const { data } = await db.from('events').select('*').eq('venue_id', VENUE_ID); EVENTS = data || []; }
+  const { data, error } = await db.from('event_financials').select('*');
+  if(error) console.warn('event_financials load error:', error.message);
+  _sfData = {};
+  (data||[]).forEach(row => { _sfData[row.event_id] = row; });
+
+  const sel = document.getElementById('sf-event-select');
+  if(sel && sel.options.length <= 1){
+    [...EVENTS].sort((a,b) => (b.date||'').localeCompare(a.date||'')).forEach(ev => {
+      const o = document.createElement('option');
+      o.value = ev.id; o.textContent = ev.name + (ev.date ? ' · '+ev.date : '');
+      sel.appendChild(o);
+    });
+  }
+  await renderShowFinancials();
+}
+
+function sfGet(eventId, field, fallback=0){
+  const v = _sfData[eventId]?.[field];
+  return (v===null || v===undefined) ? fallback : v;
+}
+
+// Expense deduction = min(actual, cap). No cap set (null) → actual applies in full.
+function sfCapped(eventId, field){
+  const actual = sfGet(eventId, field, 0);
+  const cap = _sfData[eventId]?.[field+'_cap'];
+  return (cap===null || cap===undefined || cap==='') ? actual : Math.min(actual, cap);
+}
+
+async function sfCalc(eventId){
+  if(!_sfTickets[eventId]){
+    const { data } = await db.from('tickets').select('price,fee,status,payment,tx_hash').eq('event_id', eventId);
+    _sfTickets[eventId] = data || [];
+  }
+  const all = _sfTickets[eventId];
+  const isComp    = t => t.payment === 'Complimentary';
+  const paid      = all.filter(t => !isComp(t) && t.status !== 'refunded' && t.status !== 'held');
+  const comps     = all.filter(t => isComp(t) && t.status !== 'held');
+  const refunded  = all.filter(t => t.status === 'refunded');
+  const admitted  = all.filter(t => t.status === 'scanned');
+
+  // Box office → NBOR (off-the-top deductions only, before any expense is touched)
+  const grossTicket    = paid.reduce((s,t)=>s+(t.price||0),0);
+  const feesCollected  = paid.reduce((s,t)=>s+(t.fee||0),0);
+  const taxRate        = sfGet(eventId,'tax_rate',0)/100;
+  const taxAmt         = grossTicket * taxRate;
+  const facilityPerTix = sfGet(eventId,'facility_fee_per_ticket',0);
+  const facilityFees   = paid.length * facilityPerTix;
+  const stripeSessions = new Set(paid.filter(t=>t.payment==='Card').map(t=>t.tx_hash).filter(Boolean));
+  const stripeEst       = (grossTicket+feesCollected)*SF_STRIPE_RATE + stripeSessions.size*SF_STRIPE_FIXED;
+  const refundAmt       = refunded.reduce((s,t)=>s+(t.price||0)+(t.fee||0),0);
+  const NBOR = grossTicket + feesCollected - taxAmt - facilityFees - stripeEst - refundAmt;
+
+  // Expenses — capped per line; guarantee has no cap, it's the contractual floor
+  const artistFee       = sfCapped(eventId,'artist_fee');
+  const venueRental     = sfCapped(eventId,'venue_rental');
+  const production      = sfCapped(eventId,'production');
+  const marketing       = sfCapped(eventId,'marketing');
+  const staffing        = sfCapped(eventId,'staffing');
+  const otherExp        = sfCapped(eventId,'other_expenses');
+  const totalExpenses   = artistFee+venueRental+production+marketing+staffing+otherExp;
+  const artistGuarantee = sfGet(eventId,'artist_guarantee',0);
+
+  // Backend split — Option B locked: profit % on (expenses + guarantee) combined
+  const splitEnabled     = !!sfGet(eventId,'split_enabled',0);
+  const profitPct        = sfGet(eventId,'split_point_pct',10)/100;
+  const artistBackendPct = sfGet(eventId,'artist_backend_pct',70)/100;
+  const promoterProfit   = (totalExpenses + artistGuarantee) * profitPct;
+  const splitPoint       = totalExpenses + artistGuarantee + promoterProfit;
+  const overage          = splitEnabled ? Math.max(0, NBOR - splitPoint) : 0;
+  const artistShare      = overage * artistBackendPct;
+  const promoterShare    = overage * (1 - artistBackendPct);
+  // Guarantee already removed from the pot via totalExpenses — never subtracted twice.
+  const artistPayout     = splitEnabled ? (artistGuarantee + artistShare) : artistGuarantee;
+  const promoterPayout   = splitEnabled ? (promoterProfit + promoterShare) : (NBOR - totalExpenses - artistGuarantee);
+
+  // Ancillary — isolated, never feeds NBOR/split math, venue keeps 100%
+  const fbRev    = sfGet(eventId,'fb_revenue',0);
+  const merchRev = sfGet(eventId,'merch_revenue',0);
+  const otherRev = sfGet(eventId,'other_revenue',0);
+  const totalAddlRev = fbRev+merchRev+otherRev;
+
+  // Outside co-promoter split — a DIFFERENT split than the artist deal above.
+  // This is the venue optionally sharing its own net with another promoter.
+  const venueSplitPct = sfGet(eventId,'venue_split_pct',100);
+  const venueShare     = promoterPayout * (venueSplitPct/100);
+  const outsidePromoterShare = promoterPayout * ((100-venueSplitPct)/100);
+  const venueTotalTake = venueShare + totalAddlRev;
+
+  // Break-even
+  const ev = EVENTS.find(e => e.id === eventId);
+  const avgPrice  = paid.length ? (grossTicket/paid.length) : (ev?.tier1_price || 0);
+  const totalCosts = totalExpenses + artistGuarantee;
+  const breakEven  = avgPrice>0 ? Math.ceil(totalCosts/avgPrice) : 0;
+
+  // Comp budget
+  const compBudget = sfGet(eventId,'comp_budget',0);
+
+  return {
+    paidCount: paid.length, compCount: comps.length, refundCount: refunded.length, admittedCount: admitted.length,
+    grossTicket, feesCollected, taxAmt, facilityFees, stripeEst, refundAmt, NBOR,
+    artistFee, venueRental, production, marketing, staffing, otherExp, totalExpenses, artistGuarantee,
+    splitEnabled, profitPct, artistBackendPct, promoterProfit, splitPoint, overage, artistShare, promoterShare,
+    artistPayout, promoterPayout, fbRev, merchRev, otherRev, totalAddlRev,
+    venueSplitPct, venueShare, outsidePromoterShare, venueTotalTake,
+    breakEven, avgPrice, totalCosts, compBudget,
+  };
+}
+
+function sfFieldRow(eventId, label, field, hasCap){
+  const row = _sfData[eventId] || {};
+  const capInput = hasCap ? `
+    <input class="form-input sf-input" type="number" min="0" step="0.01" placeholder="cap (optional)" value="${row[field+'_cap']??''}"
+      onchange="sfUpdate('${eventId}','${field}_cap',this.value)" style="margin-top:3px;font-size:11px;opacity:.75">` : '';
+  return `<div style="margin-bottom:.5rem">
+    <label class="sf-field-label">${label} ($)</label>
+    <input class="form-input sf-input" type="number" min="0" step="0.01" value="${row[field]||''}"
+      onchange="sfUpdate('${eventId}','${field}',this.value)">${capInput}
+  </div>`;
+}
+
+async function renderShowFinancials(){
+  const el = document.getElementById('sf-event-list');
+  if(!EVENTS.length){ el.innerHTML = '<div class="empty">No events yet — add one in the Add Event tab.</div>'; return; }
+
+  const selId = document.getElementById('sf-event-select')?.value || '';
+  const ev = EVENTS.find(e => e.id === selId);
+  if(!ev){ el.innerHTML = '<div class="empty">Select an event above to view its P&amp;L.</div>'; return; }
+
+  const row = _sfData[ev.id] || {};
+  const c = await sfCalc(ev.id);
+
+  el.innerHTML = `<div class="card" style="margin-bottom:.6rem">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:.5rem">
+        <div>
+          <div style="font-size:13px;font-weight:700;color:var(--txt)">${ev.name}</div>
+          <div style="font-size:11px;color:var(--txt3);font-family:var(--fm)">${ev.date||''} · ${c.paidCount} paid · ${c.compCount} comps · ${c.admittedCount} admitted</div>
+        </div>
+        <div style="display:flex;gap:1.25rem;align-items:center;flex-shrink:0">
+          <div style="text-align:right">
+            <div style="font-size:10px;color:var(--txt3);font-family:var(--fm)">Revenue</div>
+            <div style="font-size:13px;font-weight:700;color:var(--gold)">$${c.venueTotalTake.toFixed(2)}</div>
+          </div>
+          <div style="text-align:right">
+            <div style="font-size:10px;color:var(--txt3);font-family:var(--fm)">Expenses</div>
+            <div style="font-size:13px;font-weight:700;color:var(--redd)">$${c.totalExpenses.toFixed(2)}</div>
+          </div>
+          <div style="text-align:right">
+            <div style="font-size:10px;color:var(--txt3);font-family:var(--fm)">Net</div>
+            <div style="font-size:13px;font-weight:700;color:${c.venueTotalTake-c.totalExpenses-c.artistGuarantee>=0?'var(--okd)':'var(--redd)'}">$${(c.venueTotalTake-c.totalExpenses-c.artistGuarantee-(c.splitEnabled?c.artistShare:0)).toFixed(2)}</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="sf-panel" style="border-top:1px solid var(--border);margin-top:.75rem;padding-top:.75rem">
+        <div class="form-grid">
+          <!-- LEFT: Revenue -->
+          <div>
+            <div style="font-size:11px;font-weight:700;color:var(--gold);text-transform:uppercase;letter-spacing:1px;margin-bottom:.65rem">Revenue</div>
+            <div style="font-size:11px;font-weight:600;color:var(--txt);margin-bottom:.35rem">Ticket Sales</div>
+            <div class="sf-row"><span>Gross ticket revenue</span><span>$${c.grossTicket.toFixed(2)}</span></div>
+            <div class="sf-row"><span>Service fees collected</span><span>$${c.feesCollected.toFixed(2)}</span></div>
+            <div class="sf-row"><span>Stripe processing est.</span><span style="color:var(--redd)">-$${c.stripeEst.toFixed(2)}</span></div>
+            <div class="sf-row"><span>Facility fee (${c.paidCount} × $${(_sfData[ev.id]?.facility_fee_per_ticket||0).toFixed(2)})</span><span style="color:var(--redd)">-$${c.facilityFees.toFixed(2)}</span></div>
+            <div class="sf-row"><span>Refunds issued</span><span style="color:var(--redd)">-$${c.refundAmt.toFixed(2)}</span></div>
+            <div class="sf-row sf-subtotal"><span>Net ticket revenue (NBOR)</span><span>$${c.NBOR.toFixed(2)}</span></div>
+
+            ${c.venueSplitPct < 100 ? `
+            <div class="sf-row"><span>Venue share (${c.venueSplitPct}%)</span><span>$${c.venueShare.toFixed(2)}</span></div>
+            <div class="sf-row"><span>Outside promoter share (${100-c.venueSplitPct}%)</span><span style="color:var(--txt3)">$${c.outsidePromoterShare.toFixed(2)}</span></div>
+            ` : ''}
+
+            <div style="font-size:11px;font-weight:600;color:var(--txt);margin:.65rem 0 .35rem">Additional Revenue <span class="form-hint" style="display:inline">— venue keeps 100%, never part of the artist split</span></div>
+            <label class="sf-field-label">Food &amp; Beverage ($)</label>
+            <input class="form-input sf-input" type="number" min="0" step="0.01" value="${row.fb_revenue||''}" onchange="sfUpdate('${ev.id}','fb_revenue',this.value)" style="margin-bottom:.4rem">
+            <label class="sf-field-label">Merchandise ($)</label>
+            <input class="form-input sf-input" type="number" min="0" step="0.01" value="${row.merch_revenue||''}" onchange="sfUpdate('${ev.id}','merch_revenue',this.value)" style="margin-bottom:.4rem">
+            <label class="sf-field-label">Other Revenue ($)</label>
+            <input class="form-input sf-input" type="number" min="0" step="0.01" value="${row.other_revenue||''}" onchange="sfUpdate('${ev.id}','other_revenue',this.value)" style="margin-bottom:.4rem">
+            <div class="sf-row sf-subtotal"><span>Total additional revenue</span><span>$${c.totalAddlRev.toFixed(2)}</span></div>
+            <div class="sf-row sf-total"><span>Total Revenue</span><span style="color:var(--gold)">$${c.venueTotalTake.toFixed(2)}</span></div>
+          </div>
+
+          <!-- RIGHT: Expenses & Settings -->
+          <div>
+            <div style="font-size:11px;font-weight:700;color:var(--redd);text-transform:uppercase;letter-spacing:1px;margin-bottom:.65rem">Expenses</div>
+            ${sfFieldRow(ev.id,'Artist / Performer Fee','artist_fee',true)}
+            <div style="margin-bottom:.65rem">
+              <label class="sf-field-label">Artist Guarantee ($) <span style="font-weight:400">— no cap, this is the floor</span></label>
+              <input class="form-input sf-input" type="number" min="0" step="0.01" value="${row.artist_guarantee||''}" onchange="sfUpdate('${ev.id}','artist_guarantee',this.value)">
+            </div>
+
+            <div style="border:1px solid var(--border2);border-radius:5px;padding:.6rem;margin-bottom:.65rem;background:var(--bg3)">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:${row.split_enabled?'.55rem':'0'}">
+                <input type="checkbox" ${row.split_enabled?'checked':''} onchange="sfUpdate('${ev.id}','split_enabled',this.checked)">
+                <span style="font-size:11px;font-weight:600">Backend / Split Point Deal</span>
+              </label>
+              ${row.split_enabled ? `
+              <div style="font-size:10px;color:var(--txt3);font-family:var(--fm);margin-bottom:.5rem">
+                Promoter profit of <strong>${row.split_point_pct??10}%</strong> (on expenses + guarantee), artist gets <strong>${row.artist_backend_pct??70}%</strong> of NBOR above that point.
+                ${c.overage>0?'<span style="color:var(--okd)">✓ Backend active</span>':'<span style="color:var(--amberd)">⏳ Split point not reached</span>'}
+              </div>
+              <label class="sf-field-label">Promoter profit % (on expenses + guarantee)</label>
+              <input class="form-input sf-input" type="number" min="0" max="100" step="1" value="${row.split_point_pct??10}" onchange="sfUpdate('${ev.id}','split_point_pct',this.value)" style="margin-bottom:.4rem">
+              <label class="sf-field-label">Artist backend % (of overage)</label>
+              <input class="form-input sf-input" type="number" min="0" max="100" step="1" value="${row.artist_backend_pct??70}" onchange="sfUpdate('${ev.id}','artist_backend_pct',this.value)" style="margin-bottom:.5rem">
+              <div class="sf-row"><span>Split point threshold</span><span>$${c.splitPoint.toFixed(2)}</span></div>
+              <div class="sf-row"><span>Revenue above split point</span><span>$${c.overage.toFixed(2)}</span></div>
+              <div class="sf-row"><span>Artist backend earnings</span><span>$${c.artistShare.toFixed(2)}</span></div>
+              <div class="sf-row sf-subtotal"><span>Artist total payout</span><span>$${c.artistPayout.toFixed(2)} (guarantee $${c.artistGuarantee.toFixed(2)} + backend $${c.artistShare.toFixed(2)})</span></div>
+              ` : `<div class="form-hint">Flat guarantee only — artist payout: $${c.artistPayout.toFixed(2)}</div>`}
+            </div>
+
+            ${sfFieldRow(ev.id,'Venue Rental','venue_rental',true)}
+            ${sfFieldRow(ev.id,'Production — Sound/Lighting/AV','production',true)}
+            ${sfFieldRow(ev.id,'Marketing','marketing',true)}
+            ${sfFieldRow(ev.id,'Staffing','staffing',true)}
+            ${sfFieldRow(ev.id,'Other Expenses','other_expenses',true)}
+            <input class="form-input sf-input" type="text" placeholder="Other expense notes…" value="${row.other_expenses_notes||''}" onchange="sfUpdate('${ev.id}','other_expenses_notes',this.value)" style="margin-bottom:.4rem;font-size:11px">
+            <div class="sf-row sf-total"><span>Total Expenses (after caps)</span><span style="color:var(--redd)">$${c.totalExpenses.toFixed(2)}</span></div>
+
+            <div style="font-size:11px;font-weight:700;color:var(--txt);text-transform:uppercase;letter-spacing:1px;margin:.75rem 0 .5rem">Settings</div>
+            <label class="sf-field-label">Facility Fee / Ticket ($) <span style="font-weight:400">— off-the-top, before NBOR</span></label>
+            <input class="form-input sf-input" type="number" min="0" step="0.01" value="${row.facility_fee_per_ticket||''}" onchange="sfUpdate('${ev.id}','facility_fee_per_ticket',this.value)" style="margin-bottom:.4rem">
+            <label class="sf-field-label">Venue Revenue Split (%)</label>
+            <input class="form-input sf-input" type="number" min="0" max="100" step="1" value="${row.venue_split_pct??100}" onchange="sfUpdate('${ev.id}','venue_split_pct',this.value)" style="margin-bottom:.4rem">
+            <label class="sf-field-label">Tax Rate (%)</label>
+            <input class="form-input sf-input" type="number" min="0" max="30" step="0.01" value="${row.tax_rate||''}" onchange="sfUpdate('${ev.id}','tax_rate',this.value)" style="margin-bottom:.4rem">
+            <label class="sf-field-label">Comp Ticket Budget (# tickets)</label>
+            <input class="form-input sf-input" type="number" min="0" step="1" value="${row.comp_budget||''}" onchange="sfUpdate('${ev.id}','comp_budget',this.value)" style="margin-bottom:.4rem">
+          </div>
+        </div>
+
+        <!-- Bottom summary -->
+        <div style="border-top:1px solid var(--border);margin-top:1rem;padding-top:1rem;display:grid;grid-template-columns:repeat(3,1fr);gap:.75rem;text-align:center">
+          <div style="background:var(--bg3);border-radius:6px;padding:.75rem">
+            <div style="font-size:10px;color:var(--txt3);font-family:var(--fm);margin-bottom:4px">Break-Even Tickets</div>
+            <div style="font-size:20px;font-weight:800;color:var(--txt)">${c.breakEven}</div>
+            <div style="font-size:10px;color:var(--txt3);font-family:var(--fm)">${c.paidCount} sold · ${c.breakEven>0?(c.paidCount>=c.breakEven?'✓ Passed':(c.breakEven-c.paidCount)+' to go'):'—'}</div>
+          </div>
+          <div style="background:var(--bg3);border-radius:6px;padding:.75rem">
+            <div style="font-size:10px;color:var(--txt3);font-family:var(--fm);margin-bottom:4px">Comp Budget</div>
+            <div style="font-size:20px;font-weight:800;color:${c.compBudget>0 && c.compCount>c.compBudget?'var(--redd)':'var(--txt)'}">${c.compCount} / ${c.compBudget||'∞'}</div>
+            <div style="font-size:10px;color:var(--txt3);font-family:var(--fm)">${c.compBudget>0 && c.compCount>c.compBudget?'⚠ Over budget':'issued vs. budget'}</div>
+          </div>
+          <div style="background:${(c.venueTotalTake-c.totalExpenses-c.artistGuarantee-(c.splitEnabled?c.artistShare:0))>=0?'rgba(29,158,117,0.1)':'rgba(192,57,43,0.1)'};border-radius:6px;padding:.75rem;border:1px solid ${(c.venueTotalTake-c.totalExpenses-c.artistGuarantee-(c.splitEnabled?c.artistShare:0))>=0?'rgba(29,158,117,0.3)':'rgba(192,57,43,0.3)'}">
+            <div style="font-size:10px;color:var(--txt3);font-family:var(--fm);margin-bottom:4px">Net Profit / Loss</div>
+            <div style="font-size:22px;font-weight:900;color:${(c.venueTotalTake-c.totalExpenses-c.artistGuarantee-(c.splitEnabled?c.artistShare:0))>=0?'var(--okd)':'var(--redd)'}">$${(c.venueTotalTake-c.totalExpenses-c.artistGuarantee-(c.splitEnabled?c.artistShare:0)).toFixed(2)}</div>
+            <div style="font-size:10px;color:var(--txt3);font-family:var(--fm)">${c.taxAmt>0?'incl. $'+c.taxAmt.toFixed(2)+' tax est.':'after Stripe fees'}</div>
+          </div>
+        </div>
+
+        <div style="margin-top:.75rem;display:flex;gap:8px;justify-content:flex-end">
+          <button class="btn btn-ghost btn-sm" onclick="exportShowPL('${ev.id}')">⬇ Export P&amp;L</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+function sfUpdate(eventId, field, value){
+  if(!_sfData[eventId]) _sfData[eventId] = {};
+  if(field === 'split_enabled'){
+    _sfData[eventId][field] = value ? 1 : 0;
+  } else if(field.endsWith('_notes')){
+    _sfData[eventId][field] = value;
+  } else if(field.endsWith('_cap')){
+    _sfData[eventId][field] = (value==='' || value===null) ? null : (parseFloat(value)||0);
+  } else {
+    _sfData[eventId][field] = parseFloat(value) || 0;
+  }
+  renderShowFinancials();      // immediate re-render from memory
+  saveShowFinancials(eventId); // save to Supabase in background
+}
+
+async function saveShowFinancials(eventId){
+  const row = _sfData[eventId] || {};
+  row.event_id = eventId;
+  row.event_name = EVENTS.find(e => e.id === eventId)?.name || eventId;
+  const { error } = await db.from('event_financials').upsert(row, { onConflict: 'event_id' });
+  if(error) console.warn('event_financials save error:', error.message);
+}
+
+function exportShowPL(eventId){
+  const ev = EVENTS.find(e => e.id === eventId);
+  if(!ev) return;
+  sfCalc(eventId).then(c => {
+    const rows = [
+      ['Club Chaotic — Show P&L Report', ''],
+      ['Event', ev.name], ['Date', ev.date||''], ['Generated', new Date().toLocaleString()],
+      ['', ''], ['REVENUE', ''],
+      ['Gross Ticket Revenue', c.grossTicket], ['Service Fees Collected', c.feesCollected],
+      ['Stripe Processing Est.', -c.stripeEst], ['Facility Fee', -c.facilityFees], ['Refunds Issued', -c.refundAmt],
+      ['Net Ticket Revenue (NBOR)', c.NBOR],
+      ...(c.venueSplitPct < 100 ? [['Venue Share ('+c.venueSplitPct+'%)', c.venueShare], ['Outside Promoter Share', c.outsidePromoterShare]] : []),
+      ['Food & Beverage Revenue', c.fbRev], ['Merchandise Revenue', c.merchRev], ['Other Revenue', c.otherRev],
+      ['TOTAL REVENUE', c.venueTotalTake],
+      ['', ''], ['EXPENSES', ''],
+      ['Artist / Performer Fee', c.artistFee], ['Artist Guarantee', c.artistGuarantee],
+      ['Venue Rental', c.venueRental], ['Production (Sound/Lighting/AV)', c.production],
+      ['Marketing', c.marketing], ['Staffing', c.staffing], ['Other Expenses', c.otherExp],
+      ['TOTAL EXPENSES (after caps)', c.totalExpenses],
+      ...(c.splitEnabled ? [['', ''], ['BACKEND / SPLIT POINT DEAL', ''],
+        ['Split Point Threshold', c.splitPoint], ['Revenue Above Split Point', c.overage],
+        ['Artist Backend Earnings', c.artistShare], ['Artist Total Payout', c.artistPayout]] : []),
+      ['', ''], ['SUMMARY', ''],
+      ['Break-Even Tickets Needed', c.breakEven], ['Tickets Sold', c.paidCount],
+      ['Comp Tickets Issued', c.compCount+' / '+(c.compBudget||'No budget set')],
+      ['Tax Estimate', c.taxAmt],
+      ['NET PROFIT / LOSS', c.venueTotalTake-c.totalExpenses-c.artistGuarantee-(c.splitEnabled?c.artistShare:0)],
+    ];
+    if(typeof XLSX !== 'undefined'){
+      const ws = XLSX.utils.aoa_to_sheet(rows);
+      rows.forEach((r,i) => { const cell = ws['B'+(i+1)]; if(cell && typeof cell.v==='number') cell.z = '"$"#,##0.00;[Red]"-$"#,##0.00'; });
+      ws['!cols'] = [{wch:34},{wch:18}];
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'P&L');
+      XLSX.writeFile(wb, 'PL-'+ev.name.replace(/[^a-z0-9]/gi,'-')+'-'+new Date().toISOString().slice(0,10)+'.xlsx');
+    } else {
+      const tsv = rows.map(r => r.map(v=>String(v==null?'':v)).join('\t')).join('\n');
+      const blob = new Blob([tsv], {type:'text/tab-separated-values;charset=utf-8;'});
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'PL-'+ev.name.replace(/[^a-z0-9]/gi,'-')+'-'+new Date().toISOString().slice(0,10)+'.tsv';
+      a.click();
+    }
+  });
+}
+
+// ── DOOR ENTRY PIN CHANGE (authenticated admin action only) ────────────
+function changeDoorPin(){
+  const val = document.getElementById('new-door-pin').value.trim();
+  const msgEl = document.getElementById('door-pin-msg');
+  if(!/^[A-Za-z0-9]{8}$/.test(val)){
+    msgEl.className = 'info-box info-amber';
+    msgEl.textContent = 'PIN must be exactly 8 letters/numbers.';
+    msgEl.style.display = 'block';
+    return;
+  }
+  DOOR_PIN = val;
+  msgEl.className = 'info-box info-amber';
+  msgEl.textContent = 'PIN updated for this session — works until the page is reloaded, then resets to the default. Ask Claude to wire this to a real settings table for a permanent PIN.';
+  msgEl.style.display = 'block';
+}
+</script>
+</body>
+</html>
