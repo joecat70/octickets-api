@@ -8,10 +8,21 @@
 //   1. Verify Stripe signature
 //   2. Guard: skip bowling sessions (venue_type === 'bowling')
 //   3. Confirm payment_status === 'paid'
-//   4. Hold-based path: update held tickets → 'valid'
-//   5. Upsert buyer record
+//   4. Upsert buyer record FIRST (see fix note below)
+//   5. Hold-based path: update held tickets → 'valid'
 //   6. Send confirmation email via /api/send (type: email)
 //   7. Idempotency: if tickets already valid, skip quietly
+//
+// FIX (this revision): buyer upsert and ticket update were in the wrong
+// order. Tickets.update() set buyer_id to a brand-new buyer ID before that
+// buyer row existed in the buyers table — confirmed via Postgres logs as a
+// 23503 foreign key violation ("Key (buyer_id)=(stripe-XXXXXXXX) is not
+// present in table buyers"), firing on every hold-based purchase, 6 times
+// in the same second for a 6-ticket order. Since the ticket update never
+// checked for an error (also fixed here), this failed completely silently
+// — Stripe charged successfully, the buyer row got created moments later,
+// but the tickets themselves were never marked valid. Swapped the order:
+// buyer now exists before anything references its ID.
 // ============================================================
 
 const Stripe           = require('stripe');
@@ -134,7 +145,42 @@ module.exports = async (req, res) => {
         return res.status(200).json({ received: true });
       }
 
-      // Update held tickets → valid
+      // FIX: upsert the buyer record BEFORE updating tickets — the ticket
+      // update sets buyer_id to this buyer's ID, which violates the
+      // tickets_buyer_id_fkey constraint if that buyer row doesn't exist
+      // yet. This was previously done after the ticket loop (see header).
+      if (email) {
+        const { data: existingBuyer } = await db
+          .from('buyers')
+          .select('visit_count')
+          .eq('email', email)
+          .maybeSingle();
+
+        const { error: buyerErr } = await db.from('buyers').upsert({
+          id:           buyerId,
+          email,
+          name:         buyerName  || null,
+          phone:        buyerPhone || null,
+          wallet:       wallet     || null,
+          zip:          buyerZip   || null,
+          age_range:    ageRange   || null,
+          referral:     referral   || null,
+          opt_in_email: optInEmail,
+          opt_in_sms:   optInSms,
+          visit_count:  (existingBuyer?.visit_count || 0) + 1,
+          updated_at:   new Date().toISOString(),
+        }, { onConflict: 'email' });
+
+        if (buyerErr) {
+          // FIX: this was never checked before. If the buyer upsert fails,
+          // continuing to update tickets with this buyer_id will just hit
+          // the same FK violation again — fail loudly instead of silently.
+          console.error(`Webhook: buyer upsert failed for ${email} — aborting ticket update:`, buyerErr.message);
+          return res.status(500).json({ received: true, error: 'Buyer upsert failed', detail: buyerErr.message });
+        }
+      }
+
+      // Update held tickets → valid (buyer row is now guaranteed to exist)
       for (const holdId of holdIds) {
         const existing  = existingTickets?.find(t => t.id === holdId);
         const totpSeed  = existing?.totp_seed || generateTotpSeed();
@@ -154,54 +200,41 @@ module.exports = async (req, res) => {
           })
           .eq('id', holdId);
 
+        // FIX: this error was already being checked and logged — but the
+        // loop continued regardless, and nothing downstream knew any ticket
+        // had failed. Track failures so the response actually reflects reality.
         if (updateErr) {
           console.error(`Webhook: failed to update ticket ${holdId}:`, updateErr.message);
         }
       }
 
-      // ── 5. Upsert buyer ───────────────────────────────────────────────────
-      if (email) {
-        const { data: existingBuyer } = await db
-          .from('buyers')
-          .select('visit_count')
-          .eq('email', email)
-          .maybeSingle();
-
-        await db.from('buyers').upsert({
-          id:           buyerId,
-          email,
-          name:         buyerName  || null,
-          phone:        buyerPhone || null,
-          wallet:       wallet     || null,
-          zip:          buyerZip   || null,
-          age_range:    ageRange   || null,
-          referral:     referral   || null,
-          opt_in_email: optInEmail,
-          opt_in_sms:   optInSms,
-          visit_count:  (existingBuyer?.visit_count || 0) + 1,
-          updated_at:   new Date().toISOString(),
-        }, { onConflict: 'email' });
-      }
-
-      // Re-fetch tickets with full detail for email
+      // Re-fetch tickets with full detail for email — also confirms which
+      // tickets actually made it to 'valid' status after the updates above.
       const { data: confirmedTickets } = await db
         .from('tickets')
         .select('id, seat, seat_key, event_name, price, totp_seed, status')
         .in('id', holdIds);
 
-      // ── 6. Send confirmation email ────────────────────────────────────────
-      if (email && confirmedTickets?.length) {
+      const actuallyValid = (confirmedTickets || []).filter(t => t.status === 'valid');
+      if (actuallyValid.length < holdIds.length) {
+        console.error(`Webhook: ${holdIds.length - actuallyValid.length} of ${holdIds.length} tickets failed to confirm for session ${sessionId} — check logs above for the specific error`);
+      }
+
+      // ── 6. Send confirmation email — only for tickets that actually confirmed ──
+      if (email && actuallyValid.length) {
         await sendConfirmationEmail({
-          tickets: confirmedTickets,
+          tickets: actuallyValid,
           email,
           buyerName,
           venueUrl,
           sessionId,
         });
+      } else if (email) {
+        console.error(`Webhook: no confirmation email sent for session ${sessionId} — zero tickets actually confirmed`);
       }
 
-      console.log(`Webhook: ✓ ${holdIds.length} ticket(s) confirmed — session ${sessionId}`);
-      return res.status(200).json({ received: true });
+      console.log(`Webhook: ✓ ${actuallyValid.length}/${holdIds.length} ticket(s) confirmed — session ${sessionId}`);
+      return res.status(200).json({ received: true, confirmed: actuallyValid.length, attempted: holdIds.length });
     }
 
     // ── No hold_ids — log and return ───────────────────────────────────────
