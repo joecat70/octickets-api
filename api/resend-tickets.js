@@ -33,7 +33,7 @@ module.exports = async (req, res) => {
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-  const { email, venueUrl, ticketIds, overrideEmail, buyerName, phone, isManagerResend } = req.body;
+  const { email, venueUrl, venueId, ticketIds, overrideEmail, buyerName, phone, isManagerResend } = req.body;
 
   const sendToEmail = (overrideEmail || email || '').trim().toLowerCase();
   const base = (venueUrl || 'https://theetestsite.eth.limo').replace(/\/+$/, '');
@@ -92,9 +92,34 @@ module.exports = async (req, res) => {
 
     // ── BUYER SELF-SERVE: look up by email ───────────────────────────────────
     } else {
+      // FIX: this branch previously queried buyer_email with NO venue/event
+      // scoping at all — across a shared Supabase project serving multiple
+      // venues, this returned every valid ticket that email had EVER bought,
+      // anywhere. Confirmed via the buyer-facing "Can't find your tickets?"
+      // magic link (sendMagicLink() in club_chaotic_v2_11.html), which is the
+      // ONLY caller of this branch and never set isManagerResend.
+      // venueId is now REQUIRED here, not just used when present — a missing
+      // venueId on a future caller should fail loudly rather than silently
+      // falling back to an unscoped global lookup again.
+      if (!venueId) {
+        return res.status(400).json({ error: 'venueId is required for self-serve ticket lookup' });
+      }
+      const evRes = await fetch(
+        `${supabaseUrl}/rest/v1/events?venue_id=eq.${encodeURIComponent(venueId)}&select=id`,
+        { headers }
+      );
+      const evRows = await evRes.json() || [];
+      const eventIdFilter = evRows.map(e => e.id);
+      if (!eventIdFilter.length) {
+        // Venue has no events at all — nothing to find, skip the ticket queries entirely
+        await sendNotFoundEmail(sendToEmail);
+        return res.status(200).json({ success: true, ticketsFound: 0, message: 'No tickets found for this email.' });
+      }
+      const eventScope = `&event_id=in.(${eventIdFilter.map(id => `"${id}"`).join(',')})`;
+
       // First try buyer_email column directly on tickets (new purchases)
       const directRes = await fetch(
-        `${supabaseUrl}/rest/v1/tickets?buyer_email=eq.${encodeURIComponent(sendToEmail)}&status=eq.valid&select=id,seat,event_id,event_name,tier_name,price,payment,status`,
+        `${supabaseUrl}/rest/v1/tickets?buyer_email=eq.${encodeURIComponent(sendToEmail)}&status=eq.valid${eventScope}&select=id,seat,event_id,event_name,tier_name,price,payment,status`,
         { headers }
       );
       tickets = await directRes.json() || [];
@@ -109,7 +134,7 @@ module.exports = async (req, res) => {
         if (buyers.length) {
           const buyerIds = buyers.map(b => `"${b.id}"`).join(',');
           const ticketsRes = await fetch(
-            `${supabaseUrl}/rest/v1/tickets?buyer_id=in.(${buyerIds})&status=eq.valid&select=id,seat,event_id,event_name,tier_name,price,payment,status`,
+            `${supabaseUrl}/rest/v1/tickets?buyer_id=in.(${buyerIds})&status=eq.valid${eventScope}&select=id,seat,event_id,event_name,tier_name,price,payment,status`,
             { headers }
           );
           tickets = await ticketsRes.json() || [];
