@@ -8,8 +8,32 @@
 // require no changes. An optional explicit `action` field is also supported:
 //   action: 'create'  → force create path
 //   action: 'verify'  → force verify path
+//
+// v2 (Jul 2026): SERVER-SIDE PRICE VALIDATION added to the create path. Previously
+// unit_amount was built directly from the client-supplied seat.price with no check
+// against the event's actual configured pricing — a modified client payload could
+// charge any amount, including near-zero, on any venue. Now every seat's price is
+// checked against the real prices pulled from Supabase for that event_id before a
+// Stripe session is created; the request is rejected (400) if any seat's price
+// isn't one of the event's own published tier/section prices, and rejected if the
+// event can't be found or has no pricing configured at all (fail-closed, not
+// fail-open). NOTE: `serviceFee` is still accepted as-is from the client and is
+// NOT validated here — that's tracked separately as the Model C wiring gap
+// (service fee % not yet set in event config on most events) and needs its own
+// pass once that number exists.
+//
+// REQUIRES: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_SERVICE_KEY)
+// env vars in Vercel — same Supabase project used by stripe-webhook.js. Confirm
+// these exact var names match whatever stripe-webhook.js already uses; if that
+// file uses different names, update the two lines below to match rather than
+// adding a third set of env vars.
 
 const Stripe = require('stripe');
+const { createClient } = require('@supabase/supabase-js');
+
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY;
+const supabase = (supabaseUrl && supabaseKey) ? createClient(supabaseUrl, supabaseKey) : null;
 
 module.exports = async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -72,6 +96,66 @@ module.exports = async (req, res) => {
     } = body;
 
     if (!seats || !seats.length) return res.status(400).json({ error: 'No seats provided' });
+
+    // ── Server-side price validation ────────────────────────────────────────
+    // Fail closed: no eventId, no Supabase config, no event found, or no
+    // pricing configured on the event → refuse the checkout rather than
+    // trusting whatever the client sent.
+    if (!eventId) return res.status(400).json({ error: 'Missing eventId — cannot verify pricing' });
+    if (!supabase) {
+        console.error('create-stripe-session: Supabase not configured — refusing to trust client-supplied prices');
+        return res.status(500).json({ error: 'Server price validation unavailable' });
+    }
+
+    const { data: event, error: evErr } = await supabase
+        .from('events')
+        .select('id, tier1_price, tier2_price, tier3_price, pricing')
+        .eq('id', eventId)
+        .single();
+
+    if (evErr || !event) {
+        console.error('create-stripe-session: event lookup failed for', eventId, evErr?.message);
+        return res.status(400).json({ error: 'Event not found — cannot verify pricing' });
+    }
+
+    // Build the set of prices (in cents) this event actually allows, from
+    // whichever pricing model it uses — flat/3-tier columns (Club Chaotic,
+    // Casino By The Beach) and/or the per-section pricing jsonb (Coral
+    // Springs, Center For The Arts). Both are checked so this one function
+    // works across every venue's data shape without needing to duplicate
+    // each venue's seat-to-tier geometry here.
+    const allowedPricesCents = new Set();
+    [event.tier1_price, event.tier2_price, event.tier3_price].forEach(p => {
+        if (typeof p === 'number' && p > 0) allowedPricesCents.add(Math.round(p * 100));
+    });
+    if (event.pricing && typeof event.pricing === 'object') {
+        Object.values(event.pricing).forEach(sec => {
+            if (!sec || typeof sec !== 'object') return;
+            if (typeof sec.price === 'number') allowedPricesCents.add(Math.round(sec.price * 100));
+            ['tier1', 'tier2', 'tier3'].forEach(t => {
+                if (sec[t] && typeof sec[t].price === 'number') allowedPricesCents.add(Math.round(sec[t].price * 100));
+            });
+        });
+    }
+
+    if (allowedPricesCents.size === 0) {
+        console.error('create-stripe-session: event', eventId, 'has no configured pricing — refusing checkout');
+        return res.status(400).json({ error: 'Event has no configured pricing — cannot process payment' });
+    }
+
+    for (const seat of seats) {
+        const cents = Math.round((seat.price || 0) * 100);
+        if (!allowedPricesCents.has(cents)) {
+            console.error(
+                'create-stripe-session: REJECTED seat price', seat.price,
+                'for event', eventId, '(seat', seat.label || seat.key, ') — allowed prices were',
+                [...allowedPricesCents].map(c => c / 100)
+            );
+            return res.status(400).json({
+                error: `Ticket price for ${seat.label || seat.key} does not match this event's published pricing.`,
+            });
+        }
+    }
 
     try {
           const lineItems = seats.map(seat => ({
