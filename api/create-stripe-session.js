@@ -1,35 +1,58 @@
 // api/create-stripe-session.js
 // Handles two Stripe Checkout operations dispatched by request body shape:
 //
-//   POST { seats, eventName, ... }  → create a Checkout session (original behavior)
-//   POST { sessionId }              → verify a session's payment status (was verify-stripe-session.js)
+//   POST { seats, eventName, ... }  → create a Checkout session
+//   POST { sessionId }              → verify a session's payment status
 //
-// Backward compatible: callers that already send `seats` or `sessionId`
-// require no changes. An optional explicit `action` field is also supported:
-//   action: 'create'  → force create path
-//   action: 'verify'  → force verify path
+// Backward compatible: callers that already send `seats` or `sessionId` require no
+// changes. An optional explicit `action` field is also supported ('create'/'verify').
 //
-// v2 (Jul 2026): SERVER-SIDE PRICE VALIDATION added to the create path. Previously
-// unit_amount was built directly from the client-supplied seat.price with no check
-// against the event's actual configured pricing — a modified client payload could
-// charge any amount, including near-zero, on any venue. Now every seat's price is
-// checked against the real prices pulled from Supabase for that event_id before a
-// Stripe session is created; the request is rejected (400) if any seat's price
-// isn't one of the event's own published tier/section prices, and rejected if the
-// event can't be found or has no pricing configured at all (fail-closed, not
-// fail-open). NOTE: `serviceFee` is still accepted as-is from the client and is
-// NOT validated here — that's tracked separately as the Model C wiring gap
-// (service fee % not yet set in event config on most events) and needs its own
-// pass once that number exists.
+// ─────────────────────────────────────────────────────────────────────────────
+// v3 (Jul 13 2026) — MODEL C SPLIT. Two changes, both about money:
 //
-// REQUIRES: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_SERVICE_KEY)
-// env vars in Vercel — same Supabase project used by stripe-webhook.js. Confirm
-// these exact var names match whatever stripe-webhook.js already uses; if that
-// file uses different names, update the two lines below to match rather than
-// adding a third set of env vars.
+// 1. LINE ITEMS. Was: unit_amount = seat.price + serviceFee. Under Model C the seat
+//    price IS the all-in amount the fan pays — face value and service fee are DERIVED
+//    from it, never added on top. `serviceFee` is now IGNORED for charging (a stale
+//    client sending serviceFee > 0 would otherwise overcharge the fan on top of an
+//    all-in price). It is logged if non-zero so a stale venue file surfaces loudly.
+//
+// 2. APPLICATION FEE. Was: 10% of net after Stripe processing (the old 90/10 model).
+//    Now: the platform fee is exactly OCTL's take as computed by calcOCTLFees() —
+//    summed per seat, in cents. Everything else transfers to the venue's connected
+//    account, so the venue automatically receives:
+//
+//        allIn − stripeFee − octlTake  ===  faceValue + venueNet
+//
+//    which is precisely the Model C settlement. Note this means the venue's rebate
+//    (venueNet) is delivered BY STRIPE, per transaction, with no separate payout to
+//    reconcile — it is simply money Stripe never took out of the transfer.
+//
+//    Below ~$4.93 (card) the service fee cannot cover Stripe's own fee. octlTake
+//    floors at $0, application_fee_amount floors at 0, and the venue's transfer is
+//    allIn − stripeFee, i.e. slightly less than face value. That is deliberate and
+//    accepted (Joe, Jul 13 2026: "If there is an event at prices that low, that is
+//    on the venue, not OCTL").
+//
+//    calcOCTLFees is ALWAYS called with 'card' here: this endpoint only ever creates
+//    Stripe Checkout sessions, and crypto purchases never touch Stripe. Passing the
+//    buyer's `payment` string through would let a spoofed 'Crypto Wallet' value zero
+//    out the Stripe deduction and under-fee the platform.
+//
+// SINGLE SOURCE OF TRUTH: this file REQUIRES ../lib/calcOCTLFees.js. Do not inline a
+// copy of the fee math here. If the split ever looks wrong, run `node lib/calcOCTLFees.test.js`.
+//
+// v2 (Jul 2026): SERVER-SIDE PRICE VALIDATION on the create path — every seat's price
+// is checked against the event's real published prices from Supabase before a session
+// is created. Fails closed (400) if eventId is missing, the event isn't found, or the
+// event has no pricing configured. Retained below, unchanged. The v2 note about
+// `serviceFee` being unvalidated is now MOOT: serviceFee is no longer used to charge.
+//
+// REQUIRES: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_SERVICE_KEY).
+// ─────────────────────────────────────────────────────────────────────────────
 
 const Stripe = require('stripe');
 const { createClient } = require('@supabase/supabase-js');
+const { calcOCTLFees } = require('../lib/calcOCTLFees');
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY;
@@ -49,58 +72,54 @@ module.exports = async (req, res) => {
     const body = req.body || {};
 
     // ── Route: verify session ────────────────────────────────────────────────
-    // Triggered by explicit action:'verify' OR presence of sessionId without seats
     const isVerify = body.action === 'verify' || (!body.action && body.sessionId && !body.seats);
 
     if (isVerify) {
-          const { sessionId } = body;
-          if (!sessionId) return res.status(400).json({ error: 'Missing sessionId' });
-          try {
-                  const session = await stripe.checkout.sessions.retrieve(sessionId);
-                  if (session.payment_status === 'paid') {
-                            return res.status(200).json({
-                                        success: true,
-                                        paid: true,
-                                        customerEmail: session.customer_email || session.customer_details?.email,
-                                        amountTotal: session.amount_total,
-                                        metadata: session.metadata,
-                            });
-                  } else {
-                            return res.status(200).json({ success: true, paid: false, status: session.payment_status });
-                  }
-          } catch (err) {
-                  console.error('Stripe verify error:', err.message);
-                  return res.status(500).json({ error: 'Failed to verify session', detail: err.message });
-          }
+        const { sessionId } = body;
+        if (!sessionId) return res.status(400).json({ error: 'Missing sessionId' });
+        try {
+            const session = await stripe.checkout.sessions.retrieve(sessionId);
+            if (session.payment_status === 'paid') {
+                return res.status(200).json({
+                    success: true,
+                    paid: true,
+                    customerEmail: session.customer_email || session.customer_details?.email,
+                    amountTotal: session.amount_total,
+                    metadata: session.metadata,
+                });
+            } else {
+                return res.status(200).json({ success: true, paid: false, status: session.payment_status });
+            }
+        } catch (err) {
+            console.error('Stripe verify error:', err.message);
+            return res.status(500).json({ error: 'Failed to verify session', detail: err.message });
+        }
     }
 
     // ── Route: create session ────────────────────────────────────────────────
     const {
-          seats,
-          eventName,
-          venueUrl,
-          buyerEmail,
-          serviceFee,
-          venueStripeAccountId,
-          holdIds,
-          eventId,
-          buyerName,
-          buyerPhone,
-          buyerZip,
-          buyerAgeRange,
-          buyerReferral,
-          optInEmail,
-          optInSms,
-          payment,
-          wallet,
+        seats,
+        eventName,
+        venueUrl,
+        buyerEmail,
+        serviceFee,          // Model C: accepted for back-compat, NOT used to charge. See v3 note.
+        venueStripeAccountId,
+        holdIds,
+        eventId,
+        buyerName,
+        buyerPhone,
+        buyerZip,
+        buyerAgeRange,
+        buyerReferral,
+        optInEmail,
+        optInSms,
+        payment,
+        wallet,
     } = body;
 
     if (!seats || !seats.length) return res.status(400).json({ error: 'No seats provided' });
 
-    // ── Server-side price validation ────────────────────────────────────────
-    // Fail closed: no eventId, no Supabase config, no event found, or no
-    // pricing configured on the event → refuse the checkout rather than
-    // trusting whatever the client sent.
+    // ── Server-side price validation (v2, retained) ─────────────────────────
     if (!eventId) return res.status(400).json({ error: 'Missing eventId — cannot verify pricing' });
     if (!supabase) {
         console.error('create-stripe-session: Supabase not configured — refusing to trust client-supplied prices');
@@ -118,12 +137,6 @@ module.exports = async (req, res) => {
         return res.status(400).json({ error: 'Event not found — cannot verify pricing' });
     }
 
-    // Build the set of prices (in cents) this event actually allows, from
-    // whichever pricing model it uses — flat/3-tier columns (Club Chaotic,
-    // Casino By The Beach) and/or the per-section pricing jsonb (Coral
-    // Springs, Center For The Arts). Both are checked so this one function
-    // works across every venue's data shape without needing to duplicate
-    // each venue's seat-to-tier geometry here.
     const allowedPricesCents = new Set();
     [event.tier1_price, event.tier2_price, event.tier3_price].forEach(p => {
         if (typeof p === 'number' && p > 0) allowedPricesCents.add(Math.round(p * 100));
@@ -157,66 +170,97 @@ module.exports = async (req, res) => {
         }
     }
 
+    // ── MODEL C: derive the split from the all-in seat prices ───────────────
+    // Always 'card' — this endpoint only creates Stripe sessions; crypto never
+    // reaches Stripe, and trusting the client's `payment` string would let a
+    // spoofed 'Crypto Wallet' zero out the Stripe deduction.
+    if (serviceFee) {
+        console.warn(
+            'create-stripe-session: client sent serviceFee =', serviceFee,
+            '— IGNORED under Model C (the seat price is already all-in). This venue file is',
+            'likely stale and should be updated; the fan was NOT overcharged.'
+        );
+    }
+
+    const splits = seats.map(seat => calcOCTLFees(Number(seat.price) || 0, 'card'));
+
+    const allInCents  = splits.reduce((s, f) => s + Math.round(f.allInPrice      * 100), 0);
+    const octlCents   = splits.reduce((s, f) => s + Math.round(f.octlTake        * 100), 0);
+    const faceCents   = splits.reduce((s, f) => s + Math.round(f.faceValue       * 100), 0);
+    const feeCents    = splits.reduce((s, f) => s + Math.round(f.serviceFeeGross * 100), 0);
+    const stripeCents = splits.reduce((s, f) => s + Math.round(f.stripeFee       * 100), 0);
+
     try {
-          const lineItems = seats.map(seat => ({
-                  price_data: {
-                            currency: 'usd',
-                            product_data: { name: `${eventName} — ${seat.label || seat.key} (${seat.tier || 'General'})` },
-                            unit_amount: Math.round((seat.price + (serviceFee || 0)) * 100),
-                  },
-                  quantity: 1,
-          }));
+        // The fan is charged the ALL-IN price. Nothing is added on top.
+        const lineItems = seats.map((seat, i) => ({
+            price_data: {
+                currency: 'usd',
+                product_data: { name: `${eventName} — ${seat.label || seat.key} (${seat.tier || 'General'})` },
+                unit_amount: Math.round(splits[i].allInPrice * 100),
+            },
+            quantity: 1,
+        }));
 
-      const successUrl = `${venueUrl}/#stripe_success=true&session_id={CHECKOUT_SESSION_ID}`;
-          const cancelUrl = `${venueUrl}/#stripe_cancel=true`;
+        const successUrl = `${venueUrl}/#stripe_success=true&session_id={CHECKOUT_SESSION_ID}`;
+        const cancelUrl  = `${venueUrl}/#stripe_cancel=true`;
 
-      const metadata = {
-              event_id:        (eventId      || '').slice(0, 500),
-              event_name:      (eventName    || '').slice(0, 500),
-              buyer_name:      (buyerName    || '').slice(0, 500),
-              buyer_phone:     (buyerPhone   || '').slice(0, 500),
-              buyer_zip:       (buyerZip     || '').slice(0, 500),
-              buyer_age_range: (buyerAgeRange|| '').slice(0, 500),
-              buyer_referral:  (buyerReferral|| '').slice(0, 500),
-              opt_in_email:    optInEmail ? 'true' : 'false',
-              opt_in_sms:      optInSms   ? 'true' : 'false',
-              payment:         (payment    || 'Card').slice(0, 500),
-              wallet:          (wallet     || '').slice(0, 500),
-              service_fee:     String(serviceFee || 0),
-              hold_ids:        (holdIds    || []).join(',').slice(0, 500),
-              seats_json:      JSON.stringify(seats).slice(0, 500),
-      };
+        const metadata = {
+            event_id:        (eventId      || '').slice(0, 500),
+            event_name:      (eventName    || '').slice(0, 500),
+            buyer_name:      (buyerName    || '').slice(0, 500),
+            buyer_phone:     (buyerPhone   || '').slice(0, 500),
+            buyer_zip:       (buyerZip     || '').slice(0, 500),
+            buyer_age_range: (buyerAgeRange|| '').slice(0, 500),
+            buyer_referral:  (buyerReferral|| '').slice(0, 500),
+            opt_in_email:    optInEmail ? 'true' : 'false',
+            opt_in_sms:      optInSms   ? 'true' : 'false',
+            payment:         (payment    || 'Card').slice(0, 500),
+            wallet:          (wallet     || '').slice(0, 500),
+            hold_ids:        (holdIds    || []).join(',').slice(0, 500),
+            seats_json:      JSON.stringify(seats).slice(0, 500),
+            // Model C reconciliation record — server-derived, never client-supplied.
+            pricing_model:   'C',
+            all_in_total:    (allInCents  / 100).toFixed(2),
+            face_value:      (faceCents   / 100).toFixed(2),
+            service_fee:     (feeCents    / 100).toFixed(2),  // DERIVED, replaces the old client value
+            octl_take:       (octlCents   / 100).toFixed(2),
+            stripe_est:      (stripeCents / 100).toFixed(2),
+        };
 
-      const sessionParams = {
-              payment_method_types: ['card'],
-              line_items: lineItems,
-              mode: 'payment',
-              success_url: successUrl,
-              cancel_url: cancelUrl,
-              customer_email: buyerEmail || undefined,
-              metadata,
-      };
+        const sessionParams = {
+            payment_method_types: ['card'],
+            line_items: lineItems,
+            mode: 'payment',
+            success_url: successUrl,
+            cancel_url: cancelUrl,
+            customer_email: buyerEmail || undefined,
+            metadata,
+        };
 
-      if (venueStripeAccountId) {
-              // 90/10 split on net after Stripe processing
-            // Gross = sum of (face value + service fee) per seat
-            // Net = gross − (2.9% × gross + $0.30)
-            // Platform application fee = 10% of net (venue receives 90%)
-            const gross = seats.reduce((s, seat) => s + seat.price + (serviceFee || 0), 0);
-              const stripeProcessing = gross * 0.029 + 0.30;
-              const net = gross - stripeProcessing;
-              const applicationFee = Math.max(0, Math.round(net * 0.10 * 100)); // cents, floor at 0
+        if (venueStripeAccountId) {
+            // MODEL C SPLIT. The platform fee is exactly OCTL's take. Stripe deducts its
+            // own processing fee from the charge and transfers the remainder to the venue:
+            //
+            //     venue receives = allIn − stripeFee − octlTake = faceValue + venueNet
+            //
+            // The venue's rebate (venueNet) therefore arrives automatically, per
+            // transaction — Stripe simply never takes it out of the transfer. There is
+            // no separate rebate payout to reconcile.
+            //
+            // Floored at 0: on sub-$4.93 tickets octlTake is already $0 and the venue
+            // absorbs the Stripe shortfall (accepted — see the v3 header note).
+            const applicationFee = Math.max(0, octlCents);
             sessionParams.payment_intent_data = {
-                      application_fee_amount: applicationFee,
-                      transfer_data: { destination: venueStripeAccountId },
+                application_fee_amount: applicationFee,
+                transfer_data: { destination: venueStripeAccountId },
             };
-      }
+        }
 
-      const session = await stripe.checkout.sessions.create(sessionParams);
-          return res.status(200).json({ url: session.url });
+        const session = await stripe.checkout.sessions.create(sessionParams);
+        return res.status(200).json({ url: session.url });
 
     } catch (err) {
-          console.error('Stripe session error:', err.message);
-          return res.status(500).json({ error: err.message });
+        console.error('Stripe session error:', err.message);
+        return res.status(500).json({ error: err.message });
     }
 };
