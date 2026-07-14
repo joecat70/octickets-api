@@ -8,6 +8,18 @@
 // changes. An optional explicit `action` field is also supported ('create'/'verify').
 //
 // ─────────────────────────────────────────────────────────────────────────────
+// v4 (Jul 14 2026) — RESALE (TICKET EXCHANGE) PRICE VALIDATION.
+// The v2 price check validates every seat price against the event's PUBLISHED tier
+// prices. That is right for a primary sale and wrong for a resale, where the price is
+// the seller's ask and by definition will not match a published tier — so the exchange
+// path 400'd on every venue ("does not match this event's published pricing"), and on
+// Live Demo it failed even earlier because the exchange payload never sent eventId.
+// v4 adds an isExchange branch that validates the ask against the LISTING ROW instead:
+// tickets.listed_price, on a ticket that is genuinely status='listed' and genuinely
+// belongs to this event. Same fail-closed principle, correct source of truth. Callers
+// must send { isExchange: true, eventId, ticketId } and exactly one seat.
+// NOTE the flagged OPEN QUESTION on resale economics near application_fee_amount below.
+//
 // v3 (Jul 13 2026) — MODEL C SPLIT. Two changes, both about money:
 //
 // 1. LINE ITEMS. Was: unit_amount = seat.price + serviceFee. Under Model C the seat
@@ -115,6 +127,8 @@ module.exports = async (req, res) => {
         optInSms,
         payment,
         wallet,
+        isExchange,          // v4: resale purchase from the Ticket Exchange
+        ticketId,            // v4: REQUIRED when isExchange — the listing being bought
     } = body;
 
     if (!seats || !seats.length) return res.status(400).json({ error: 'No seats provided' });
@@ -124,6 +138,60 @@ module.exports = async (req, res) => {
     if (!supabase) {
         console.error('create-stripe-session: Supabase not configured — refusing to trust client-supplied prices');
         return res.status(500).json({ error: 'Server price validation unavailable' });
+    }
+
+    // ── v4: RESALE (Ticket Exchange) price validation ────────────────────────
+    // A resale price is the SELLER'S ASK, not one of the event's published tier
+    // prices — so the primary-sale check below would reject every resale outright.
+    // That is exactly what was happening: the exchange path 400'd on every venue
+    // (Live Demo additionally never sent eventId at all, so it failed even earlier).
+    //
+    // The fix is a different source of truth, NOT a weaker one. The ask is validated
+    // against the listing row itself: tickets.listed_price, on a ticket that is
+    // actually status='listed' and actually belongs to this event. Trusting the
+    // client's price here would let anyone buy a $200 listing for $1.
+    //
+    // The ask was already capped at listing time by zeroscalp.js validate_price
+    // (resale_rule='original_plus_fees' → max = original + Stripe fee). This check
+    // is downstream of that: whatever ZeroScalp allowed onto the listing is what the
+    // buyer pays, and nothing else.
+    if (isExchange) {
+        if (!ticketId) return res.status(400).json({ error: 'Missing ticketId — cannot verify resale price' });
+        if (seats.length !== 1) return res.status(400).json({ error: 'A resale purchase must be exactly one ticket' });
+
+        const { data: listing, error: lErr } = await supabase
+            .from('tickets')
+            .select('id, event_id, status, listed_price')
+            .eq('id', ticketId)
+            .maybeSingle();
+
+        if (lErr || !listing) {
+            console.error('create-stripe-session: resale listing lookup failed for', ticketId, lErr?.message);
+            return res.status(400).json({ error: 'Listing not found — cannot verify resale price' });
+        }
+        if (listing.status !== 'listed') {
+            console.error('create-stripe-session: REJECTED resale — ticket', ticketId, 'has status', listing.status, '(not listed)');
+            return res.status(400).json({ error: 'This ticket is no longer listed for sale.' });
+        }
+        if (listing.event_id !== eventId) {
+            console.error('create-stripe-session: REJECTED resale — ticket', ticketId, 'belongs to event', listing.event_id, 'not', eventId);
+            return res.status(400).json({ error: 'Listing does not belong to this event.' });
+        }
+
+        const askedCents  = Math.round((seats[0].price || 0) * 100);
+        const listedCents = Math.round((Number(listing.listed_price) || 0) * 100);
+        if (listedCents <= 0) {
+            console.error('create-stripe-session: REJECTED resale — ticket', ticketId, 'has no listed_price');
+            return res.status(400).json({ error: 'Listing has no price — cannot process payment.' });
+        }
+        if (askedCents !== listedCents) {
+            console.error(
+                'create-stripe-session: REJECTED resale price', seats[0].price,
+                'for ticket', ticketId, '— listed_price is', listing.listed_price
+            );
+            return res.status(400).json({ error: "Resale price does not match this ticket's listing." });
+        }
+        console.log('create-stripe-session: ✓ resale validated — ticket', ticketId, 'at $' + listing.listed_price);
     }
 
     const { data: event, error: evErr } = await supabase
@@ -156,7 +224,8 @@ module.exports = async (req, res) => {
         return res.status(400).json({ error: 'Event has no configured pricing — cannot process payment' });
     }
 
-    for (const seat of seats) {
+    // Primary sales only — a resale was already validated against its listing above.
+    for (const seat of (isExchange ? [] : seats)) {
         const cents = Math.round((seat.price || 0) * 100);
         if (!allowedPricesCents.has(cents)) {
             console.error(
@@ -217,6 +286,8 @@ module.exports = async (req, res) => {
             payment:         (payment    || 'Card').slice(0, 500),
             wallet:          (wallet     || '').slice(0, 500),
             hold_ids:        (holdIds    || []).join(',').slice(0, 500),
+            is_exchange:     isExchange ? 'true' : 'false',
+            resale_ticket_id:(isExchange ? String(ticketId || '') : '').slice(0, 500),
             seats_json:      JSON.stringify(seats).slice(0, 500),
             // Model C reconciliation record — server-derived, never client-supplied.
             pricing_model:   'C',
@@ -249,6 +320,16 @@ module.exports = async (req, res) => {
             //
             // Floored at 0: on sub-$4.93 tickets octlTake is already $0 and the venue
             // absorbs the Stripe shortfall (accepted — see the v3 header note).
+            // OPEN QUESTION — RESALE ECONOMICS (flagged Jul 14 2026, NOT decided):
+            // On a RESALE this takes OCTL's normal per-ticket cut out of the seller's
+            // ask, ON TOP OF the venue's 10% royalty (which is collected separately —
+            // payouts pay the seller listed_price × 0.9). Nobody has decided whether
+            // OCTL should take a second cut on resales, or whether its share should
+            // come OUT of the venue's 10%, or be zero. This has no effect today: every
+            // demo venue has venueStripeAccountId = null, so this whole block is
+            // skipped. It MUST be settled before the first venue onboards with a real
+            // Stripe Connect account. Behaviour is deliberately left AS-IS rather than
+            // guessed at.
             const applicationFee = Math.max(0, octlCents);
             sessionParams.payment_intent_data = {
                 application_fee_amount: applicationFee,
