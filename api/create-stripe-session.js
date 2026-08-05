@@ -8,6 +8,28 @@
 // changes. An optional explicit `action` field is also supported ('create'/'verify').
 //
 // ─────────────────────────────────────────────────────────────────────────────
+// v5 (Aug 2026) — FLAT-TIER FEE ENGINE + RESALE FLAT FEE (replaces Model C).
+// lib/calcOCTLFees.js was rewritten from Model C's percentage formula to fixed
+// per-tier constants (see that file's header for the full tier table). No call
+// site here changed for the primary-sale path — same function name, same
+// return shape, same import.
+//
+// What DID change here: the v4 OPEN QUESTION on resale economics (immediately
+// below) is now RESOLVED. calcOCTLFees() is called with { isResale: true }
+// whenever isExchange is true, which routes to a flat $2.00 fee, 100% to OCTL,
+// $0 to venue FROM THIS FEE — replacing the primary-sale tier table for
+// resales entirely, so OCTL's cut no longer scales with the resale price and
+// no longer stacks the primary-sale tier fee on top of the venue's separate
+// 10% royalty. That royalty (collected via payouts, seller listed_price × 0.9)
+// is UNCHANGED and untouched by this file. DEMO FIGURE (Joe, Aug 2026) —
+// revisit the $2.00 before a real venue resale goes live; see
+// lib/calcOCTLFees.js for the full note.
+//
+// metadata.pricing_model is now 'flat-tier-v1' (primary) or
+// 'flat-tier-v1-resale' (resale) instead of the old hardcoded 'C', so past and
+// future transaction records stay distinguishable by which engine/mode priced
+// them.
+// ─────────────────────────────────────────────────────────────────────────────
 // v4 (Jul 14 2026) — RESALE (TICKET EXCHANGE) PRICE VALIDATION.
 // The v2 price check validates every seat price against the event's PUBLISHED tier
 // prices. That is right for a primary sale and wrong for a resale, where the price is
@@ -18,7 +40,8 @@
 // tickets.listed_price, on a ticket that is genuinely status='listed' and genuinely
 // belongs to this event. Same fail-closed principle, correct source of truth. Callers
 // must send { isExchange: true, eventId, ticketId } and exactly one seat.
-// NOTE the flagged OPEN QUESTION on resale economics near application_fee_amount below.
+// NOTE the resale economics question flagged here was RESOLVED in v5 — see that
+// section above and the (no longer "OPEN") note near application_fee_amount below.
 //
 // v3 (Jul 13 2026) — MODEL C SPLIT. Two changes, both about money:
 //
@@ -239,19 +262,21 @@ module.exports = async (req, res) => {
         }
     }
 
-    // ── MODEL C: derive the split from the all-in seat prices ───────────────
+    // ── FLAT-TIER: derive the split from the all-in seat prices ─────────────
     // Always 'card' — this endpoint only creates Stripe sessions; crypto never
     // reaches Stripe, and trusting the client's `payment` string would let a
-    // spoofed 'Crypto Wallet' zero out the Stripe deduction.
+    // spoofed 'Crypto Wallet' zero out the Stripe deduction. isResale routes a
+    // Ticket Exchange purchase to the flat resale fee instead of the tier table
+    // (see lib/calcOCTLFees.js).
     if (serviceFee) {
         console.warn(
             'create-stripe-session: client sent serviceFee =', serviceFee,
-            '— IGNORED under Model C (the seat price is already all-in). This venue file is',
+            '— IGNORED (the seat price is already all-in). This venue file is',
             'likely stale and should be updated; the fan was NOT overcharged.'
         );
     }
 
-    const splits = seats.map(seat => calcOCTLFees(Number(seat.price) || 0, 'card'));
+    const splits = seats.map(seat => calcOCTLFees(Number(seat.price) || 0, 'card', { isResale: !!isExchange }));
 
     const allInCents  = splits.reduce((s, f) => s + Math.round(f.allInPrice      * 100), 0);
     const octlCents   = splits.reduce((s, f) => s + Math.round(f.octlTake        * 100), 0);
@@ -289,8 +314,8 @@ module.exports = async (req, res) => {
             is_exchange:     isExchange ? 'true' : 'false',
             resale_ticket_id:(isExchange ? String(ticketId || '') : '').slice(0, 500),
             seats_json:      JSON.stringify(seats).slice(0, 500),
-            // Model C reconciliation record — server-derived, never client-supplied.
-            pricing_model:   'C',
+            // Flat-tier reconciliation record — server-derived, never client-supplied.
+            pricing_model:   isExchange ? 'flat-tier-v1-resale' : 'flat-tier-v1',
             all_in_total:    (allInCents  / 100).toFixed(2),
             face_value:      (faceCents   / 100).toFixed(2),
             service_fee:     (feeCents    / 100).toFixed(2),  // DERIVED, replaces the old client value
@@ -309,27 +334,28 @@ module.exports = async (req, res) => {
         };
 
         if (venueStripeAccountId) {
-            // MODEL C SPLIT. The platform fee is exactly OCTL's take. Stripe deducts its
-            // own processing fee from the charge and transfers the remainder to the venue:
+            // FLAT-TIER SPLIT (v5, Aug 2026 — was MODEL C SPLIT through v4). The
+            // platform fee is exactly OCTL's take. Stripe deducts its own processing
+            // fee from the charge and transfers the remainder to the venue:
             //
             //     venue receives = allIn − stripeFee − octlTake = faceValue + venueNet
             //
-            // The venue's rebate (venueNet) therefore arrives automatically, per
-            // transaction — Stripe simply never takes it out of the transfer. There is
-            // no separate rebate payout to reconcile.
+            // octlTake and venueNet are now FIXED CONSTANTS per tier (primary sale) or
+            // the flat $2.00/$0.00 resale split (see lib/calcOCTLFees.js) — neither can
+            // go negative or need flooring under flat-tier, unlike Model C. Any Stripe-
+            // cost shortfall on a cheap card ticket shows up in faceValue instead, which
+            // is NOT part of this transfer calculation — it only affects the artist
+            // settlement figure recorded in metadata.
             //
-            // Floored at 0: on sub-$4.93 tickets octlTake is already $0 and the venue
-            // absorbs the Stripe shortfall (accepted — see the v3 header note).
-            // OPEN QUESTION — RESALE ECONOMICS (flagged Jul 14 2026, NOT decided):
-            // On a RESALE this takes OCTL's normal per-ticket cut out of the seller's
-            // ask, ON TOP OF the venue's 10% royalty (which is collected separately —
-            // payouts pay the seller listed_price × 0.9). Nobody has decided whether
-            // OCTL should take a second cut on resales, or whether its share should
-            // come OUT of the venue's 10%, or be zero. This has no effect today: every
-            // demo venue has venueStripeAccountId = null, so this whole block is
-            // skipped. It MUST be settled before the first venue onboards with a real
-            // Stripe Connect account. Behaviour is deliberately left AS-IS rather than
-            // guessed at.
+            // RESALE ECONOMICS — RESOLVED (was OPEN QUESTION, flagged Jul 14 2026,
+            // resolved Aug 2026): on a resale, octlTake is now the flat $2.00 resale
+            // fee (100% OCTL, $0 venue from THIS fee — see the isResale branch in
+            // lib/calcOCTLFees.js), not the primary-sale tier cut. It no longer stacks
+            // on top of the venue's separately-collected 10% royalty (payouts pay the
+            // seller listed_price × 0.9, untouched by this file). DEMO FIGURE — revisit
+            // the $2.00 before a real venue resale goes live. This has no live effect
+            // today regardless: every demo venue has venueStripeAccountId = null, so
+            // this whole block is still skipped.
             const applicationFee = Math.max(0, octlCents);
             sessionParams.payment_intent_data = {
                 application_fee_amount: applicationFee,
