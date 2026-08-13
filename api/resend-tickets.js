@@ -1,7 +1,19 @@
 // api/resend-tickets.js
 // NOTE: original filename unconfirmed — rename to match the actual repo file.
 //
-// Two fixes applied to the original logic:
+// v-next FIX (Aug 2026): the "View Ticket" button used
+// background: linear-gradient(135deg,#d4af37,#f0c842) with color:#000000.
+// Several email clients (confirmed: at least one dark-mode / Gmail-app-style
+// renderer) drop unsupported `background: linear-gradient(...)` on <a> tags
+// silently rather than falling back to any solid color — leaving black text
+// sitting directly on the email body's #0a0a0f background, invisible. Fixed
+// by using a solid background-color instead of a gradient. Gradients on
+// interactive email elements are unreliable enough across clients that this
+// is the standard "bulletproof button" practice for transactional email —
+// not worth the visual flourish given the failure mode is buyers unable to
+// find their tickets at all.
+//
+// Three fixes now applied total, two from before:
 //   1. claim_tokens.phone was being set to the buyer's EMAIL address, not an
 //      actual phone number. ZeroScalp's whole identity model is phone-based —
 //      a phone column full of email strings breaks anything downstream that
@@ -104,8 +116,25 @@ module.exports = async (req, res) => {
       if (!venueId) {
         return res.status(400).json({ error: 'venueId is required for self-serve ticket lookup' });
       }
+      // v-next FIX (Joe, Aug 2026): scoped to upcoming events PLUS a 30-day
+      // post-show window — this was returning every valid ticket for every
+      // event this venue has EVER hosted, no date filtering at all. Simpler
+      // than event-based claim_tokens.expires_at (which would need each
+      // ticket in a batch to get its own expiry, since different tickets can
+      // be for different events with different dates): handled entirely here
+      // in the resend lookup instead. claim_tokens themselves stay
+      // effectively permanent (see farFutureExpiry equivalent below) — a
+      // buyer who already has a working link keeps it regardless of this
+      // window; this only controls whether a FRESH link gets resent for an
+      // old show. events.date is a plain date column (confirmed against
+      // dbRowToEvent() in the venue files) — "today" computed in UTC to
+      // match how the column is written and compared client-side.
+      const RESEND_POST_SHOW_WINDOW_DAYS = 30;
+      const cutoff = new Date();
+      cutoff.setUTCDate(cutoff.getUTCDate() - RESEND_POST_SHOW_WINDOW_DAYS);
+      const cutoffISO = cutoff.toISOString().slice(0, 10);
       const evRes = await fetch(
-        `${supabaseUrl}/rest/v1/events?venue_id=eq.${encodeURIComponent(venueId)}&select=id`,
+        `${supabaseUrl}/rest/v1/events?venue_id=eq.${encodeURIComponent(venueId)}&date=gte.${cutoffISO}&select=id`,
         { headers }
       );
       const evRows = await evRes.json() || [];
@@ -155,7 +184,16 @@ module.exports = async (req, res) => {
     }
 
     // ── Generate claim tokens and send email ─────────────────────────────────
-    const expires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+    // v-next FIX (Joe, Aug 2026): 7-day expiration removed on purpose — traced
+    // back to the original May build, where it was a default picked once and
+    // never revisited, not a deliberate security decision. Using an
+    // effectively-permanent date rather than null: claim.js's expiry check is
+    // a plain `new Date(expires_at) < new Date()` comparison, and a null
+    // would evaluate to epoch (1970) — immediately "expired" — unless that
+    // check were also rewritten to special-case null. A far-future date needs
+    // no changes anywhere else that reads expires_at.
+    const NO_EXPIRY_YEARS = 100;
+    const expires = new Date(Date.now() + NO_EXPIRY_YEARS * 365 * 24 * 60 * 60 * 1000).toISOString();
     const ticketLinks = [];
 
     for (const ticket of tickets) {
@@ -194,7 +232,7 @@ module.exports = async (req, res) => {
           <div style="font-size:13px;color:#9090b0;margin-top:3px;">${t.seat || 'General Admission'}${t.tier_name ? ' · ' + t.tier_name : ''}</div>
           <div style="font-size:11px;color:#555570;margin-top:3px;font-family:monospace;">${t.id}</div>
         </div>
-        <a href="${t.claimUrl}" style="display:block;background:linear-gradient(135deg,#d4af37,#f0c842);color:#000000;text-decoration:none;text-align:center;padding:13px 24px;border-radius:6px;font-weight:700;font-size:14px;">
+        <a href="${t.claimUrl}" style="display:block;background-color:#d4af37;color:#000000;text-decoration:none;text-align:center;padding:13px 24px;border-radius:6px;font-weight:700;font-size:14px;">
           View Ticket ${i + 1} →
         </a>
       </div>
@@ -224,7 +262,7 @@ module.exports = async (req, res) => {
           <div style="background:#12121a;border:1px solid #2a2a3a;border-radius:8px;padding:16px;margin-top:8px;margin-bottom:24px;">
             <div style="font-size:12px;color:#9090b0;line-height:1.6;">
               🔒 <strong style="color:#ffffff;">Each link is single-use.</strong>
-              First tap activates your rotating QR code. Links expire in 7 days.
+              First tap activates your rotating QR code.
             </div>
           </div>
           <div style="text-align:center;"><div style="font-size:11px;color:#555570;">OC Tickets Live · Powered by Ethereum</div></div>
