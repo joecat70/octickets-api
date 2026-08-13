@@ -17,6 +17,25 @@
 // caller (Coral Springs, Live Demo, a future venue) ever misses it. Changed
 // to the venue-neutral hub domain, matching what the email branch already
 // does correctly below.
+//
+// FIX (Aug 2026, Joe): 7-day claim_tokens.expires_at removed from BOTH the
+// email and sms branches. Traced back to the original May build — a default
+// picked once and never revisited, not a deliberate security decision. This
+// is the file that actually generates a buyer's FIRST claim link at purchase
+// time (resend-tickets.js only handles later resends, and had the identical
+// pattern independently fixed already) — so this was the one really causing
+// "already used or expired" on original purchase emails. Using an
+// effectively-permanent date rather than null: claim.js's expiry check is a
+// plain `new Date(expires_at) < new Date()` comparison, and null would
+// evaluate to epoch (1970) — immediately "expired" — unless that check were
+// also rewritten to special-case null. A far-future date needs no changes
+// anywhere else that reads expires_at. Matches resend-tickets.js exactly, so
+// both files now generate tokens the same way. Buyer-facing "Valid for 7
+// days" text removed from the email template below since it would now be
+// false. NOTE: if event-based expiry (expire N days after the show, not from
+// send time) gets built later per the open discussion, both this file and
+// resend-tickets.js need the change together — they're confirmed-parallel
+// logic now, not independent.
 // ============================================================
 
 const { Resend }       = require('resend');
@@ -29,6 +48,11 @@ const CORS = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type',
 };
+
+const NO_EXPIRY_YEARS = 100;
+function farFutureExpiry() {
+  return new Date(Date.now() + NO_EXPIRY_YEARS * 365 * 24 * 60 * 60 * 1000);
+}
 
 module.exports = async function handler(req, res) {
   Object.entries(CORS).forEach(([k, v]) => res.setHeader(k, v));
@@ -59,7 +83,7 @@ module.exports = async function handler(req, res) {
     const baseUrl      = (venueUrl || 'https://octicketslive.eth.limo').replace(/\/+$/, '');
 
     const token     = uuidv4();
-    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    const expiresAt = farFutureExpiry();
 
     const db = createClient(
       process.env.SUPABASE_URL,
@@ -166,7 +190,7 @@ module.exports = async function handler(req, res) {
           <tr><td style="padding:16px">
             <div style="font-size:10px;color:#8a7f5c;letter-spacing:1.5px;text-transform:uppercase;font-family:monospace;margin-bottom:8px">Secure Ticket Link</div>
             <div style="font-size:11px;color:#c9a84c;word-break:break-all;font-family:monospace;line-height:1.6">${claimUrl}</div>
-            <div style="font-size:11px;color:#4a4530;margin-top:8px">Valid for 7 days · Tap or copy into your browser</div>
+            <div style="font-size:11px;color:#4a4530;margin-top:8px">Tap or copy into your browser</div>
           </td></tr>
         </table>
         <table width="100%" cellpadding="0" cellspacing="0" style="background:#0f0e0a;border:1px solid #1e1c14;border-radius:6px;margin-bottom:8px">
@@ -228,7 +252,7 @@ module.exports = async function handler(req, res) {
 
     try {
       const token     = uuidv4();
-      const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+      const expiresAt = farFutureExpiry();
 
       const db = createClient(
         process.env.SUPABASE_URL,
