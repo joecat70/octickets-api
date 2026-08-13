@@ -1,12 +1,31 @@
 // api/transfer-ticket.js
 // Confirmed filename — client call found at club_chaotic_v2_11.html line ~4575.
 //
-// Three fixes applied to the original logic:
+// Four fixes applied to the original logic (fourth added this revision):
 //   1. buyer_email/buyer_name/buyer_phone are now actually written on resale
 //   2. totp_seed is rotated on every resale, invalidating the old QR
 //   3. the previous owner's claim_tokens are expired immediately on transfer
+//   4. resale_price is now recorded (Aug 2026, Joe) — a NEW column, separate
+//      from price. price is left untouched deliberately: it still means
+//      "original sale amount" everywhere else that reads it, most notably
+//      renderVenueOverview()'s "Primary Revenue" admin metric, which would
+//      silently start mixing resale dollars into a primary-sales-only figure
+//      if price were overwritten here instead. resale_price sourced from
+//      session.amount_total — the CONFIRMED Stripe charge, in cents, divided
+//      to dollars — not from listed_price (what the seller typed in before
+//      payment), since the confirmed charge is the one actually true.
+//      Requires: ALTER TABLE tickets ADD COLUMN IF NOT EXISTS resale_price
+//      numeric; (run directly in Supabase SQL editor — not applied by this
+//      file). Prerequisite for a future receipt feature (Joe, Aug 2026: a
+//      resold ticket's receipt should show what the current holder actually
+//      paid, not the original purchase price) — this revision only makes
+//      that number available to read; it does not build the receipt itself.
+//      NOTE: this endpoint requires a paid Stripe session and can only ever
+//      be the resale-completion path — gifts/free transfers (giftStep() in
+//      the venue files) go through a different, not-yet-built mechanism and
+//      are unaffected by this change.
 //
-// Without these three fixes, the original seller retained a fully working
+// Without the first three fixes, the original seller retained a fully working
 // claim link + valid rotating QR code after reselling a ticket — meaning two
 // people could use the same ticket to enter. Confirmed via cross-reference
 // with claim.js (re-access is explicitly allowed and never re-checks identity)
@@ -55,6 +74,15 @@ module.exports = async (req, res) => {
     // this isn't rotated, the old owner keeps a fully working ticket forever.
     const newTotpSeed = generateTotpSeed();
 
+    // FIX 4: the confirmed charge, not the pre-purchase asking price. Stripe
+    // reports amount_total in cents; session.amount_total will always be a
+    // whole number of cents here (it's what was actually charged), so
+    // dividing by 100 produces a clean 2-decimal dollar figure with no
+    // rounding artifacts — no need to round2() this.
+    const resalePrice = typeof session.amount_total === 'number'
+      ? session.amount_total / 100
+      : null;
+
     const { error } = await supabase
       .from('tickets')
       .update({
@@ -70,6 +98,9 @@ module.exports = async (req, res) => {
         buyer_name:  buyerName  || null,
         buyer_phone: buyerPhone || null,
         totp_seed:   newTotpSeed,
+        // FIX 4: see header note — price (original sale amount) is
+        // deliberately left untouched.
+        resale_price: resalePrice,
       })
       .eq('id', ticketId);
 
