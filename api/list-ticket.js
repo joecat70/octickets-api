@@ -32,22 +32,19 @@
 // the client), so this endpoint is the authority — the browser no longer
 // has a code path that can write a listing at all.
 //
-// ── DEPLOYMENT NOTES (read before wiring this in) ──────────────────────
-// This file was written to the pattern used elsewhere in this codebase
-// (e.g. refund-stripe.js, transfer-ticket.js) as best as that pattern
-// could be inferred without direct access to this repo's existing api/
-// files in this session. Before deploying, please check/reconcile:
-//   1. Env var names for the Supabase URL and SERVICE ROLE key — adjust
-//      the two `process.env.*` lines below if this repo uses different
-//      names than SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY.
-//   2. Whether this repo uses a shared db-client helper (e.g. a lib/db.js)
-//      instead of instantiating `createClient` per-file — if so, swap the
-//      import below to match.
-//   3. Any shared CORS/header handling other api/*.js files apply that
-//      isn't shown here.
-// The logic (ownership re-derivation, code hashing, atomic status guard)
-// is the part that matters and shouldn't need to change — just the
-// surrounding plumbing to match how the rest of this API is wired.
+// ── DEPLOYMENT NOTES ────────────────────────────────────────────────────
+// Env var names (SUPABASE_URL / SUPABASE_SERVICE_KEY) confirmed against
+// this repo's actual transfer-ticket.js and refund-stripe.js — both agree
+// on this exact pair, now matched here. No shared db-client helper exists
+// in either reference file (both instantiate createClient() inline, same
+// as this file does) — nothing to reconcile there. CORS/OPTIONS handling
+// was missing entirely in an earlier draft of this file (the two reference
+// files handle it in slightly different styles from each other); added
+// here matching transfer-ticket.js's simpler res.setHeader approach, since
+// without it this endpoint could not be called from the browser at all.
+// Still worth a glance before deploy: neither reference file gave a strong
+// signal either way on rate limiting or logging conventions beyond what's
+// already here.
 // ─────────────────────────────────────────────────────────────────────
 
 const { createClient } = require('@supabase/supabase-js');
@@ -55,7 +52,7 @@ const crypto = require('crypto');
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
+  process.env.SUPABASE_SERVICE_KEY
 );
 
 const CODE_TTL_MS = 10 * 60 * 1000; // 10 minutes — matches prior client-side UX
@@ -75,6 +72,10 @@ function batchKey(ticketIds) {
 }
 
 module.exports = async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') {
     return res.status(405).json({ success: false, error: 'Method not allowed' });
   }
