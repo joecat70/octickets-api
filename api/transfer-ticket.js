@@ -9,6 +9,23 @@
 // test (Joe, Aug 16): sold a ticket, tried to cancel the (already-sold)
 // listing — correctly rejected — but received no email at all.
 //
+// CORRECTION (Aug 2026, Joe): the first version of this change deliberately
+// left the net payout dollar amount OUT of the email — that was a judgment
+// call made unilaterally, not something Joe asked for, and he corrected it:
+// knowing the actual payout is basic transparency, not optional, and it
+// needs to be ACCURATE, not a guess. The concern behind the original
+// decision was real (this file had no access to the royalty calculation and
+// guessing risked a wrong number in a financial email) but the fix was
+// wrong — the right move was to go find the actual authoritative formula,
+// not omit the information. That formula turned out to be simple and
+// already verified: updateSellCalc() in the listing modal computes a flat
+// total*0.1 royalty / total*0.9 seller-payout split — the exact number a
+// seller already sees and agrees to when listing. Replicated verbatim
+// below. Separately worth knowing: that formula is hardcoded to 10%, not
+// read from the event's own configurable royalty_percent column — same bug
+// shape as the Tier 3 pricing issue, not yet confirmed to have actually
+// caused a wrong number anywhere, logged as its own item.
+//
 // Unlike the equivalent gift-side email (list-ticket.js's gift-confirm),
 // this one is NOT skipped when zero tickets remain. A gift-giver already
 // gets real-time on-screen confirmation the moment the transfer completes;
@@ -158,6 +175,18 @@ module.exports = async (req, res) => {
       ? session.amount_total / 100
       : null;
 
+    // Aug 2026 (Joe): net payout now included in the sold-notification email
+    // below. This formula is copied verbatim from updateSellCalc() in the
+    // listing modal — total * 0.1 royalty, total * 0.9 to the seller — since
+    // that's the exact number the seller already saw and agreed to when they
+    // listed. NOTE: that formula is currently a hardcoded 10%, NOT read from
+    // the event's own royalty_percent column, even though that column
+    // exists and is configurable via the admin wizard. If updateSellCalc()
+    // is ever changed to read royalty_percent dynamically, THIS calculation
+    // needs to change with it — they are now coupled, not independent.
+    const royaltyAmount = typeof resalePrice === 'number' ? resalePrice * 0.1 : null;
+    const netPayout      = typeof resalePrice === 'number' ? resalePrice * 0.9 : null;
+
     const { error } = await supabase
       .from('tickets')
       .update({
@@ -249,6 +278,8 @@ module.exports = async (req, res) => {
         soldSeat,
         eventName: soldEventName,
         resalePrice,
+        royaltyAmount,
+        netPayout,
         payoutMethod,
         payoutHandle,
         remainingTicketIds: remaining.map(r => r.id),
