@@ -1,5 +1,23 @@
 // api/list-ticket.js
 //
+// OCTL Live Demo — ownership-verification security fixes (v3, 2026-08-16)
+//
+// v3 FIX: gift-confirm's two post-write emails (recipient's ticket
+// confirmation, giver's remaining-tickets notice) always fell back to the
+// hub domain (octicketslive.eth.limo) instead of the actual venue, because
+// this endpoint runs server-side and has no window.location to draw a URL
+// from the way every client-side email call in this codebase does — and
+// venueUrl was never added as a parameter here, so send.js's own fallback
+// silently kicked in every time. Confirmed via live reproduction (Joe, Aug
+// 16): both emails linked to the hub, ticket unreachable there; manually
+// swapping the domain to the real venue while keeping the same claim token
+// worked immediately — proving the token/data were always correct and only
+// the link's domain was wrong. Fix: gift-confirm now accepts venueUrl from
+// the client and passes it through to both emails, matching the pattern
+// already used everywhere else. Client-side (live_demo_*.html) needs the
+// matching change — giftStep()'s confirm call must send
+// venueUrl: window.location.origin.
+//
 // OCTL Live Demo — ownership-verification security fixes (v2, 2026-08-15)
 //
 // v1 covered "List on Exchange" only (see the WHY/THE FIX notes further
@@ -32,7 +50,7 @@
 //   { action: 'request-code',      ticketIds }
 //   { action: 'confirm-listing',   ticketIds, code, price, payoutMethod, payoutHandle }
 //   { action: 'gift-request-code', ticketId, recipientEmail, recipientName }
-//   { action: 'gift-confirm',      ticketId, code }
+//   { action: 'gift-confirm',      ticketId, code, venueUrl }
 //   { action: 'cancel-request-code', ticketId }
 //   { action: 'cancel-confirm',      ticketId, code }
 //
@@ -462,7 +480,7 @@ async function handleGiftRequestCode(req, res) {
 }
 
 async function handleGiftConfirm(req, res) {
-  const { ticketId, code } = req.body || {};
+  const { ticketId, code, venueUrl } = req.body || {};
   if (!ticketId) return res.status(400).json({ success: false, error: 'No ticket specified.' });
   if (!code || typeof code !== 'string') {
     return res.status(400).json({ success: false, error: 'Verification code required.' });
@@ -576,6 +594,7 @@ async function handleGiftConfirm(req, res) {
     seats: [updated.seat],
     seatCount: 1,
     eventName: updated.event_name,
+    venueUrl,
   });
 
   // Giver's remaining tickets — found by the OLD tx_hash (captured before
@@ -599,6 +618,7 @@ async function handleGiftConfirm(req, res) {
       ticketIds: remaining.map(r => r.id),
       seats: remaining.map(r => r.seat),
       seatCount: remaining.length,
+      venueUrl,
       // eventName intentionally omitted — send.js resolves it server-side
       // from the primary ticket if not given a good one.
     });
