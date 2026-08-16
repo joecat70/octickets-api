@@ -7,6 +7,31 @@
 //   'email'  → ticket confirmation email + claim token (was send-email.js)
 //   'sms'    → ticket SMS + claim token      (was send-sms.js)
 //   'verify' → listing/gift verification code email (was send-verify.js)
+//   'sold'   → seller sold-notification + remaining tickets (Aug 2026)
+//
+// FIX (Aug 2026, Joe): new 'sold' type. Added because transfer-ticket.js's
+// resale-completion path sent NO email of any kind to the seller — no
+// confirmation a sale happened, no way back into their other tickets.
+// Confirmed via live test: sold a ticket, correctly got rejected trying to
+// cancel the (already-sold) listing, but received nothing at all. This is
+// deliberately its OWN type rather than reusing 'email' — 'email's copy
+// ("Your ticket is confirmed... Access My Ticket") is simply wrong for a
+// seller who just gave a ticket up, and 'email' has no way to say anything
+// when there's nothing left to link to (zero remaining tickets), which is
+// a real case here since a seller might have listed their only ticket.
+// Combined into one send per explicit request — not two separate emails —
+// so remaining tickets, when there are any, are folded into the same
+// message rather than following the gift-email's two-message shape.
+// Unlike gift's remaining-tickets email, this type ALWAYS sends (a seller
+// walking away from a listing has no other signal a sale occurred; a gift
+// giver already sees real-time on-screen confirmation, so that email can
+// skip sending when nothing remains — this one can't).
+// No specific payout dollar amount is stated — the actual payout is the
+// sale price minus the venue's royalty, computed at listing time, not
+// available in this file. Stating a guessed net figure risks being wrong
+// in a financial email; the confirmed gross sale price is shown instead,
+// which the data backs completely, and payout method/handle are shown
+// without a dollar amount attached.
 //
 // FIX (this revision): the SMS branch's venueUrl fallback was hardcoded to
 // theetestsite.eth.limo (Casino By The Beach specifically). If any caller
@@ -60,7 +85,7 @@ module.exports = async function handler(req, res) {
   if (req.method !== 'POST')   return res.status(405).json({ error: 'Method not allowed' });
 
   const { type } = req.body || {};
-  if (!type) return res.status(400).json({ error: 'type required: email | sms | verify' });
+  if (!type) return res.status(400).json({ error: 'type required: email | sms | verify | sold' });
 
   // ============================================================
   // TYPE: email
@@ -90,7 +115,6 @@ module.exports = async function handler(req, res) {
       process.env.SUPABASE_SERVICE_KEY
     );
 
-    // Authoritative event name lookup
     let resolvedEventName = eventName;
     if (!resolvedEventName || resolvedEventName.startsWith('evt_')) {
       try {
@@ -238,6 +262,185 @@ module.exports = async function handler(req, res) {
   }
 
   // ============================================================
+  // TYPE: sold  (Aug 2026)
+  // Seller notification after a resale completes, combined with a link to
+  // any remaining tickets in the same send. Always sends — see file header
+  // for why this differs from the gift-side email's skip-if-none behavior.
+  // ============================================================
+  if (type === 'sold') {
+    const {
+      email, name, soldTicketId, soldSeat, eventName,
+      resalePrice, payoutMethod, payoutHandle,
+      remainingTicketIds, remainingSeats, venueUrl,
+    } = req.body;
+
+    if (!email || !soldTicketId) {
+      return res.status(400).json({ error: 'Missing email or soldTicketId' });
+    }
+
+    const sellerName = name || 'Ticket Holder';
+    const baseUrl    = (venueUrl || 'https://octicketslive.eth.limo').replace(/\/+$/, '');
+    const hasRemaining = Array.isArray(remainingTicketIds) && remainingTicketIds.length > 0;
+    const remainingCount = hasRemaining ? remainingTicketIds.length : 0;
+
+    const db = createClient(
+      process.env.SUPABASE_URL,
+      process.env.SUPABASE_SERVICE_KEY
+    );
+
+    let claimUrl = null;
+    if (hasRemaining) {
+      const token     = uuidv4();
+      const expiresAt = farFutureExpiry();
+      const { error: dbError } = await db.from('claim_tokens').insert({
+        id:         uuidv4(),
+        token,
+        ticket_id:  remainingTicketIds[0],
+        phone:      '',
+        expires_at: expiresAt.toISOString(),
+        claimed:    false,
+      });
+      if (dbError) {
+        console.error('send/sold: DB error saving claim token for remaining tickets:', dbError);
+      } else {
+        claimUrl = `${baseUrl}/#claim=${token}`;
+      }
+    }
+
+    const remainingRows = hasRemaining
+      ? remainingTicketIds.map((id, i) => `
+      <tr>
+        <td style="padding:10px 16px;border-bottom:1px solid #1e1c14;font-family:-apple-system,sans-serif;font-size:13px;color:#d4c88a">
+          ${id || ''}
+        </td>
+        <td style="padding:10px 16px;border-bottom:1px solid #1e1c14;font-family:-apple-system,sans-serif;font-size:13px;color:#f5f0e6;font-weight:600">
+          ${(remainingSeats && remainingSeats[i]) || ''}
+        </td>
+      </tr>`).join('')
+      : '';
+
+    const priceLine = (typeof resalePrice === 'number')
+      ? `$${resalePrice.toFixed(2)}`
+      : 'the listed price';
+
+    const payoutBlock = (payoutMethod && payoutHandle) ? `
+        <table width="100%" cellpadding="0" cellspacing="0" style="background:#13110a;border:1px solid #2a2310;border-radius:6px;margin-bottom:24px">
+          <tr><td style="padding:16px">
+            <div style="font-size:10px;color:#8a7f5c;letter-spacing:1.5px;text-transform:uppercase;font-family:monospace;margin-bottom:6px">Payout</div>
+            <div style="font-size:14px;color:#f5f0e6">Being processed via <strong>${payoutMethod}</strong> to <strong>${payoutHandle}</strong>.</div>
+          </td></tr>
+        </table>` : '';
+
+    const remainingBlock = hasRemaining ? `
+        <table width="100%" cellpadding="0" cellspacing="0" style="background:#13110a;border:1px solid #2a2310;border-radius:6px;margin-bottom:24px">
+          <tr><td style="padding:16px">
+            <div style="font-size:10px;color:#8a7f5c;letter-spacing:1.5px;text-transform:uppercase;font-family:monospace;margin-bottom:8px">
+              You Still Have ${remainingCount} Ticket${remainingCount > 1 ? 's' : ''}
+            </div>
+            <table width="100%" cellpadding="0" cellspacing="0">
+              <tr>
+                <th style="padding:8px 16px;background:#0a0900;font-size:10px;color:#8a7f5c;text-transform:uppercase;letter-spacing:1px;font-family:monospace;font-weight:400;text-align:left">Ticket ID</th>
+                <th style="padding:8px 16px;background:#0a0900;font-size:10px;color:#8a7f5c;text-transform:uppercase;letter-spacing:1px;font-family:monospace;font-weight:400;text-align:left">Seat</th>
+              </tr>
+              ${remainingRows}
+            </table>
+          </td></tr>
+        </table>
+        <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px">
+          <tr><td align="center">
+            <a href="${claimUrl}" style="display:inline-block;background:#c9a84c;color:#000;text-decoration:none;font-weight:700;font-size:14px;letter-spacing:1px;padding:14px 36px;border-radius:4px;text-transform:uppercase">
+              Access My Remaining Ticket${remainingCount > 1 ? 's' : ''} →
+            </a>
+          </td></tr>
+        </table>` : '';
+
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Your Ticket Sold — OC Tickets Live</title>
+</head>
+<body style="margin:0;padding:0;background:#0a0900;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#0a0900;padding:32px 16px">
+  <tr><td align="center">
+  <table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%">
+    <tr>
+      <td style="background:#0e0c08;border:1px solid #2a2310;border-radius:8px 8px 0 0;padding:24px 32px;text-align:center;border-bottom:1px solid #c9a84c40">
+        <table width="100%" cellpadding="0" cellspacing="0"><tr><td align="center">
+          <div style="display:inline-block;background:#c9a84c;width:36px;height:36px;border-radius:50%;line-height:36px;text-align:center;font-size:18px;margin-bottom:10px">💰</div>
+          <div style="font-family:Georgia,serif;font-size:22px;font-weight:700;color:#f5f0e6;letter-spacing:4px;text-transform:uppercase">OC Tickets Live</div>
+          <div style="font-size:11px;color:#8a7f5c;letter-spacing:1px;margin-top:4px;font-family:monospace">octicketslive.eth · Reserved Seating</div>
+        </td></tr></table>
+      </td>
+    </tr>
+    <tr><td style="height:2px;background:linear-gradient(90deg,transparent,#c9a84c,transparent)"></td></tr>
+    <tr>
+      <td style="background:#0e0c08;border:1px solid #2a2310;border-top:none;padding:32px">
+        <p style="margin:0 0 24px;font-size:15px;color:#d4c88a;line-height:1.6">
+          Hi ${sellerName},<br><br>
+          Good news — your ticket sold.
+        </p>
+        <table width="100%" cellpadding="0" cellspacing="0" style="background:#13110a;border:1px solid #2a2310;border-radius:6px;margin-bottom:24px">
+          <tr><td style="padding:16px;border-bottom:1px solid #1e1c14">
+            <div style="font-size:10px;color:#8a7f5c;letter-spacing:1.5px;text-transform:uppercase;font-family:monospace;margin-bottom:6px">Event</div>
+            <div style="font-size:18px;font-weight:700;color:#f5f0e6;font-family:Georgia,serif">${eventName || 'Your Event'}</div>
+          </td></tr>
+          <tr><td style="padding:16px;border-bottom:1px solid #1e1c14">
+            <div style="font-size:10px;color:#8a7f5c;letter-spacing:1.5px;text-transform:uppercase;font-family:monospace;margin-bottom:6px">Seat Sold</div>
+            <div style="font-size:14px;color:#f5f0e6">${soldSeat || soldTicketId}</div>
+          </td></tr>
+          <tr><td style="padding:16px">
+            <div style="font-size:10px;color:#8a7f5c;letter-spacing:1.5px;text-transform:uppercase;font-family:monospace;margin-bottom:6px">Sale Price</div>
+            <div style="font-size:18px;font-weight:700;color:#c9a84c">${priceLine}</div>
+          </td></tr>
+        </table>
+        ${payoutBlock}
+        ${remainingBlock}
+        <table width="100%" cellpadding="0" cellspacing="0" style="background:#0f0e0a;border:1px solid #1e1c14;border-radius:6px;margin-bottom:8px">
+          <tr><td style="padding:14px 16px">
+            <div style="font-size:11px;color:#6a6040;line-height:1.7;font-family:monospace">
+              🔒 Your old claim link for this seat no longer works — ownership has transferred to the new holder.
+            </div>
+          </td></tr>
+        </table>
+      </td>
+    </tr>
+    <tr>
+      <td style="background:#080700;border:1px solid #2a2310;border-top:none;border-radius:0 0 8px 8px;padding:20px 32px;text-align:center">
+        <div style="font-size:10px;color:#4a4530;font-family:monospace;line-height:1.8">
+          OC Tickets Live · octicketslive.com<br>
+          Questions? Reply to this email.<br>
+          This link was sent to ${email}
+        </div>
+      </td>
+    </tr>
+  </table>
+  </td></tr>
+</table>
+</body></html>`;
+
+    try {
+      const resend = new Resend(process.env.RESEND_API_KEY);
+      const { error: emailError } = await resend.emails.send({
+        from:    'OC Tickets Live <tickets@octicketslive.com>',
+        to:      email,
+        subject: `Your Ticket Sold — ${eventName || 'Event'}`,
+        html,
+      });
+      if (emailError) {
+        console.error('send/sold: Resend error:', emailError);
+        return res.status(500).json({ success: false, error: 'Email delivery failed', detail: emailError });
+      }
+      console.log(`send/sold: ✓ sent to ${email} — ticket ${soldTicketId}, ${remainingCount} remaining`);
+      return res.status(200).json({ success: true });
+    } catch (err) {
+      console.error('send/sold: unexpected error:', err);
+      return res.status(500).json({ success: false, error: 'Unexpected error', detail: err.message });
+    }
+  }
+
+  // ============================================================
   // TYPE: sms
   // ============================================================
   if (type === 'sms') {
@@ -269,8 +472,6 @@ module.exports = async function handler(req, res) {
       });
       if (dbError) return res.status(500).json({ error: 'Failed to save token' });
 
-      // FIX: was 'https://theetestsite.eth.limo' (Casino By The Beach specifically).
-      // Matches the email branch's already-correct venue-neutral hub fallback.
       const claimUrl = `${(venueUrl || 'https://octicketslive.eth.limo').replace(/\/+$/, '')}/#claim=${token}`;
       const client   = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
@@ -338,5 +539,5 @@ module.exports = async function handler(req, res) {
     }
   }
 
-  return res.status(400).json({ error: `Unknown type: ${type}. Must be email | sms | verify` });
+  return res.status(400).json({ error: `Unknown type: ${type}. Must be email | sms | verify | sold` });
 };
