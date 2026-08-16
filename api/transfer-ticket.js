@@ -83,7 +83,21 @@
 // buyerPhone locally but never including it in the request body — fixed there too.
 // NOTE (Aug 2026): live_demo_*.html's call site has this SAME buyerPhone gap,
 // confirmed while making the change above — not fixed here, logged separately,
-// out of scope for this specific change.
+// out of scope for this specific change. UPDATE: fixed in live_demo v8.3, on
+// both its card and crypto/wallet resale paths.
+//
+// FIX (Aug 2026): royaltyAmount/netPayout below no longer hardcode 10% — now
+// read the specific event's own royalty_percent column, matching the same
+// fix just applied to updateSellCalc() in the listing modal (live_demo
+// v8.4). These two were explicitly coupled per this file's own note above;
+// this closes that gap. royaltyPercent is now also passed through to
+// send.js's payload so the email template can eventually show the real
+// percentage — send.js itself still hardcodes literal "(10%)" text in its
+// copy and has NOT been updated to use this new field yet. Until it is, the
+// dollar amounts in the sold-notification email will be correct for any
+// event's actual rate, but the percentage printed alongside them will still
+// read "(10%)" regardless of what that rate actually is. Logged, not fixed
+// here — separate file.
 
 const { createClient } = require('@supabase/supabase-js');
 const crypto = require('crypto');
@@ -148,7 +162,7 @@ module.exports = async (req, res) => {
     // tickets (by old tx_hash) still legitimately belong to them.
     const { data: preTransfer, error: preFetchErr } = await supabase
       .from('tickets')
-      .select('buyer_email, buyer_name, tx_hash, seat, event_name')
+      .select('buyer_email, buyer_name, tx_hash, seat, event_name, event_id')
       .eq('id', ticketId)
       .single();
 
@@ -175,17 +189,30 @@ module.exports = async (req, res) => {
       ? session.amount_total / 100
       : null;
 
-    // Aug 2026 (Joe): net payout now included in the sold-notification email
-    // below. This formula is copied verbatim from updateSellCalc() in the
-    // listing modal — total * 0.1 royalty, total * 0.9 to the seller — since
-    // that's the exact number the seller already saw and agreed to when they
-    // listed. NOTE: that formula is currently a hardcoded 10%, NOT read from
-    // the event's own royalty_percent column, even though that column
-    // exists and is configurable via the admin wizard. If updateSellCalc()
-    // is ever changed to read royalty_percent dynamically, THIS calculation
-    // needs to change with it — they are now coupled, not independent.
-    const royaltyAmount = typeof resalePrice === 'number' ? resalePrice * 0.1 : null;
-    const netPayout      = typeof resalePrice === 'number' ? resalePrice * 0.9 : null;
+    // v2 FIX (Aug 2026): royalty_percent is now read from the event's own
+    // configurable column instead of a hardcoded 10% — the server-side half
+    // of the fix already applied to updateSellCalc() in the listing modal
+    // (live_demo v8.4). Every event in the DB is set to 10 today (checked
+    // directly against Supabase), so this has never produced a wrong number
+    // yet, but this file and the client would have silently disagreed the
+    // moment any event was configured differently. Non-fatal lookup, same
+    // pattern as the payout_method/payout_handle read further down — a
+    // failed lookup or a missing value falls back to 10, matching both the
+    // DB column's own default and updateSellCalc()'s client-side fallback.
+    let royaltyPercent = 10;
+    try {
+      const { data: eventRow } = await supabase
+        .from('events')
+        .select('royalty_percent')
+        .eq('id', preTransfer?.event_id)
+        .maybeSingle();
+      if (eventRow && eventRow.royalty_percent != null) royaltyPercent = Number(eventRow.royalty_percent);
+    } catch (royaltyLookupErr) {
+      console.warn('transfer-ticket: royalty_percent lookup failed for', ticketId, royaltyLookupErr.message);
+    }
+
+    const royaltyAmount = typeof resalePrice === 'number' ? resalePrice * (royaltyPercent / 100) : null;
+    const netPayout      = typeof resalePrice === 'number' ? resalePrice - royaltyAmount : null;
 
     const { error } = await supabase
       .from('tickets')
@@ -279,6 +306,7 @@ module.exports = async (req, res) => {
         eventName: soldEventName,
         resalePrice,
         royaltyAmount,
+        royaltyPercent,
         netPayout,
         payoutMethod,
         payoutHandle,
