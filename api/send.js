@@ -26,12 +26,15 @@
 // walking away from a listing has no other signal a sale occurred; a gift
 // giver already sees real-time on-screen confirmation, so that email can
 // skip sending when nothing remains — this one can't).
-// No specific payout dollar amount is stated — the actual payout is the
-// sale price minus the venue's royalty, computed at listing time, not
-// available in this file. Stating a guessed net figure risks being wrong
-// in a financial email; the confirmed gross sale price is shown instead,
-// which the data backs completely, and payout method/handle are shown
-// without a dollar amount attached.
+// CORRECTION (Aug 2026, Joe): the net payout dollar amount (sale price
+// minus venue royalty) IS shown, computed by transfer-ticket.js using the
+// same formula the listing modal's updateSellCalc() already uses (flat
+// total*0.1 royalty / total*0.9 to seller) — the exact figure a seller
+// already saw and agreed to when listing. An earlier version of this file
+// deliberately omitted this, reasoning that a guessed net figure risked
+// being wrong in a financial email — that concern was valid, but the right
+// fix was finding the real authoritative formula, not leaving the
+// information out. See transfer-ticket.js's header for the full account.
 //
 // FIX (this revision): the SMS branch's venueUrl fallback was hardcoded to
 // theetestsite.eth.limo (Casino By The Beach specifically). If any caller
@@ -270,7 +273,7 @@ module.exports = async function handler(req, res) {
   if (type === 'sold') {
     const {
       email, name, soldTicketId, soldSeat, eventName,
-      resalePrice, payoutMethod, payoutHandle,
+      resalePrice, royaltyAmount, netPayout, payoutMethod, payoutHandle,
       remainingTicketIds, remainingSeats, venueUrl,
     } = req.body;
 
@@ -323,13 +326,26 @@ module.exports = async function handler(req, res) {
       ? `$${resalePrice.toFixed(2)}`
       : 'the listed price';
 
-    const payoutBlock = (payoutMethod && payoutHandle) ? `
+    // Aug 2026 (Joe): net payout now shown explicitly — same "Venue Royalty
+    // $X · You receive $Y" language already used in the listing modal, for
+    // consistency with what the seller already saw and agreed to. See this
+    // file's header for why an earlier version of this email deliberately
+    // omitted this figure, and why that was corrected.
+    const hasPayoutMath = typeof royaltyAmount === 'number' && typeof netPayout === 'number';
+    const hasPayoutMethod = !!(payoutMethod && payoutHandle);
+
+    const payoutBlock = `
         <table width="100%" cellpadding="0" cellspacing="0" style="background:#13110a;border:1px solid #2a2310;border-radius:6px;margin-bottom:24px">
-          <tr><td style="padding:16px">
-            <div style="font-size:10px;color:#8a7f5c;letter-spacing:1.5px;text-transform:uppercase;font-family:monospace;margin-bottom:6px">Payout</div>
-            <div style="font-size:14px;color:#f5f0e6">Being processed via <strong>${payoutMethod}</strong> to <strong>${payoutHandle}</strong>.</div>
+          <tr><td style="padding:16px${hasPayoutMethod ? ';border-bottom:1px solid #1e1c14' : ''}">
+            <div style="font-size:10px;color:#8a7f5c;letter-spacing:1.5px;text-transform:uppercase;font-family:monospace;margin-bottom:6px">You Receive</div>
+            <div style="font-size:18px;font-weight:700;color:#c9a84c">${hasPayoutMath ? `$${netPayout.toFixed(2)}` : priceLine}</div>
+            ${hasPayoutMath ? `<div style="font-size:12px;color:#8a7f5c;margin-top:4px">Sale price ${priceLine} minus $${royaltyAmount.toFixed(2)} venue royalty (10%)</div>` : ''}
           </td></tr>
-        </table>` : '';
+          ${hasPayoutMethod ? `<tr><td style="padding:16px">
+            <div style="font-size:10px;color:#8a7f5c;letter-spacing:1.5px;text-transform:uppercase;font-family:monospace;margin-bottom:6px">Payout Method</div>
+            <div style="font-size:14px;color:#f5f0e6">Being processed via <strong>${payoutMethod}</strong> to <strong>${payoutHandle}</strong>.</div>
+          </td></tr>` : ''}
+        </table>`;
 
     const remainingBlock = hasRemaining ? `
         <table width="100%" cellpadding="0" cellspacing="0" style="background:#13110a;border:1px solid #2a2310;border-radius:6px;margin-bottom:24px">
