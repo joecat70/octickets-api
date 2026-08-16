@@ -1,7 +1,39 @@
 // api/transfer-ticket.js
 // Confirmed filename — client call found at club_chaotic_v2_11.html line ~4575.
 //
-// Four fixes applied to the original logic (fourth added this revision):
+// FIX (Aug 2026, Joe): combined "your ticket sold" + "here are your
+// remaining tickets" seller notification. Neither existed before — this
+// endpoint wrote the new owner's data, rotated the QR, and expired the old
+// claim link, then stopped. The seller got nothing: no confirmation a sale
+// even happened, no way back into their other tickets. Confirmed via live
+// test (Joe, Aug 16): sold a ticket, tried to cancel the (already-sold)
+// listing — correctly rejected — but received no email at all.
+//
+// Unlike the equivalent gift-side email (list-ticket.js's gift-confirm),
+// this one is NOT skipped when zero tickets remain. A gift-giver already
+// gets real-time on-screen confirmation the moment the transfer completes;
+// a seller who lists a ticket and walks away has no signal whatsoever that
+// it sold except this email, so it always fires. When tickets do remain,
+// the same email folds in a working link to them — one send, not two, per
+// Joe's explicit request rather than porting the gift email's two-message
+// shape over unchanged.
+//
+// Requires api/send.js's new `type: 'sold'` branch (added alongside this
+// change) — that's where the actual template/claim-token logic lives, same
+// division of responsibility as every other email in this codebase.
+//
+// Now also reads payout_method/payout_handle from the payouts row this
+// ticket's listing already created (list-ticket.js's confirm-listing), so
+// the email can tell the seller how they're being paid — not just that a
+// sale happened. Non-fatal if that lookup finds nothing; the email still
+// sends without the payout line.
+//
+// Companion client-side fix required: the venueUrl this endpoint now reads
+// from req.body was never being sent — see live_demo_v8.html's call site.
+// Same class of bug as v7.5.31's gift-email fix (server has no
+// window.location of its own; must be told).
+//
+// Four fixes applied to the original logic (unchanged from before):
 //   1. buyer_email/buyer_name/buyer_phone are now actually written on resale
 //   2. totp_seed is rotated on every resale, invalidating the old QR
 //   3. the previous owner's claim_tokens are expired immediately on transfer
@@ -32,6 +64,9 @@
 // and validate-ticket.js (trusts totp_seed alone, no ownership check).
 // Companion fix: club_chaotic_v2_11.html's call to this endpoint was computing
 // buyerPhone locally but never including it in the request body — fixed there too.
+// NOTE (Aug 2026): live_demo_*.html's call site has this SAME buyerPhone gap,
+// confirmed while making the change above — not fixed here, logged separately,
+// out of scope for this specific change.
 
 const { createClient } = require('@supabase/supabase-js');
 const crypto = require('crypto');
@@ -41,11 +76,32 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY
 );
 
+const VERCEL_API = 'https://octickets-api.vercel.app';
+
 // Same seed format used in stripe-webhook.js — 20 random bytes, hex-encoded uppercase.
 function generateTotpSeed() {
   const bytes = [];
   for (let i = 0; i < 20; i++) bytes.push(Math.floor(Math.random() * 256));
   return bytes.map(b => b.toString(16).padStart(2, '0')).join('').toUpperCase();
+}
+
+// Fire-and-log, never fatal — the transfer itself has already succeeded by
+// the time this runs. Same philosophy as every other post-write email call
+// in this codebase (list-ticket.js's payout inserts, gift-confirm's emails).
+async function sendEmailSafe(payload) {
+  try {
+    const resp = await fetch(`${VERCEL_API}/api/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await resp.json();
+    if (!data.success) console.error('sendEmailSafe: send.js reported failure', payload.type, data.error);
+    return data.success === true;
+  } catch (e) {
+    console.error('sendEmailSafe: send.js unreachable', payload.type, e.message);
+    return false;
+  }
 }
 
 module.exports = async (req, res) => {
@@ -57,7 +113,7 @@ module.exports = async (req, res) => {
 
   // FIX 1: buyerPhone is now an accepted param — required for ZeroScalp's
   // phone-match identity model to work correctly for the NEW owner.
-  const { ticketId, sessionId, buyerEmail, buyerName, buyerPhone, payment } = req.body;
+  const { ticketId, sessionId, buyerEmail, buyerName, buyerPhone, payment, venueUrl } = req.body;
   if (!ticketId || !sessionId) return res.status(400).json({ error: 'Missing ticketId or sessionId' });
 
   try {
@@ -68,6 +124,25 @@ module.exports = async (req, res) => {
     }
 
     const txHash = 'stripe:' + sessionId;
+
+    // Capture the SELLER's info before it gets overwritten below — this is
+    // the piece that was missing entirely before this change. Without this
+    // read, there's no way to know who to notify or which of their other
+    // tickets (by old tx_hash) still legitimately belong to them.
+    const { data: preTransfer, error: preFetchErr } = await supabase
+      .from('tickets')
+      .select('buyer_email, buyer_name, tx_hash, seat, event_name')
+      .eq('id', ticketId)
+      .single();
+
+    if (preFetchErr || !preTransfer) {
+      console.error('transfer-ticket: could not read pre-transfer ticket state for', ticketId, preFetchErr && preFetchErr.message);
+    }
+    const sellerEmail = preTransfer?.buyer_email || null;
+    const sellerName = preTransfer?.buyer_name || 'Guest';
+    const oldTxHash = preTransfer?.tx_hash || null;
+    const soldSeat = preTransfer?.seat || null;
+    const soldEventName = preTransfer?.event_name || 'Event';
 
     // FIX 2: rotate the TOTP seed on every resale. The old owner's claim link
     // generates QR codes purely from totp_seed (see validate-ticket.js) — if
@@ -130,6 +205,59 @@ module.exports = async (req, res) => {
       .select('*')
       .eq('id', ticketId)
       .single();
+
+    // ── Seller notification: always sent, combined with remaining tickets
+    // when there are any. Fire-and-log — the transfer has already fully
+    // succeeded by this point, an email failure here shouldn't undo any of
+    // the above or fail this response.
+    if (sellerEmail) {
+      let remaining = [];
+      if (oldTxHash) {
+        const { data: remainingRows } = await supabase
+          .from('tickets')
+          .select('id, seat')
+          .eq('tx_hash', oldTxHash)
+          .neq('id', ticketId);
+        remaining = remainingRows || [];
+      }
+
+      // Optional nicety, non-fatal if it finds nothing: tell the seller how
+      // they're being paid, not just that a sale happened. This ticket's
+      // listing (list-ticket.js confirm-listing) already created this row.
+      let payoutMethod = null, payoutHandle = null;
+      try {
+        const { data: payoutRow } = await supabase
+          .from('payouts')
+          .select('payout_method, payout_handle')
+          .eq('ticket_id', ticketId)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        if (payoutRow) {
+          payoutMethod = payoutRow.payout_method;
+          payoutHandle = payoutRow.payout_handle;
+        }
+      } catch (payoutLookupErr) {
+        console.warn('transfer-ticket: payout lookup failed for', ticketId, payoutLookupErr.message);
+      }
+
+      await sendEmailSafe({
+        type: 'sold',
+        email: sellerEmail,
+        name: sellerName,
+        soldTicketId: ticketId,
+        soldSeat,
+        eventName: soldEventName,
+        resalePrice,
+        payoutMethod,
+        payoutHandle,
+        remainingTicketIds: remaining.map(r => r.id),
+        remainingSeats: remaining.map(r => r.seat),
+        venueUrl,
+      });
+    } else {
+      console.warn('transfer-ticket: no seller email on file for', ticketId, '— sold notification skipped');
+    }
 
     return res.status(200).json({ success: true, ticket, txHash });
   } catch (err) {
