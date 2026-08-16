@@ -35,6 +35,14 @@
 // being wrong in a financial email — that concern was valid, but the right
 // fix was finding the real authoritative formula, not leaving the
 // information out. See transfer-ticket.js's header for the full account.
+// UPDATE (Aug 2026): the "flat total*0.1/total*0.9" description above is no
+// longer accurate — both this file and transfer-ticket.js now read the
+// specific event's own royalty_percent instead of hardcoding 10%. The
+// dollar amounts below were already sourced from transfer-ticket.js, so
+// they update automatically; the "(10%)" text right next to them was a
+// separate literal string in this file's own copy and did NOT update on
+// its own — fixed below (see royaltyPct) to actually reflect what
+// transfer-ticket.js sends, not what it used to always send.
 //
 // FIX (this revision): the SMS branch's venueUrl fallback was hardcoded to
 // theetestsite.eth.limo (Casino By The Beach specifically). If any caller
@@ -273,7 +281,7 @@ module.exports = async function handler(req, res) {
   if (type === 'sold') {
     const {
       email, name, soldTicketId, soldSeat, eventName,
-      resalePrice, royaltyAmount, netPayout, payoutMethod, payoutHandle,
+      resalePrice, royaltyAmount, royaltyPercent, netPayout, payoutMethod, payoutHandle,
       remainingTicketIds, remainingSeats, venueUrl,
     } = req.body;
 
@@ -333,13 +341,22 @@ module.exports = async function handler(req, res) {
     // omitted this figure, and why that was corrected.
     const hasPayoutMath = typeof royaltyAmount === 'number' && typeof netPayout === 'number';
     const hasPayoutMethod = !!(payoutMethod && payoutHandle);
+    // FIX (Aug 2026): was a literal "(10%)" in the copy below regardless of
+    // what the event was actually configured for — the dollar amounts above
+    // were already coming from transfer-ticket.js's real per-event
+    // royalty_percent lookup, but the sentence next to them still claimed
+    // 10% unconditionally. transfer-ticket.js now sends the real percentage
+    // it used; falls back to 10 (matching every other fallback in this same
+    // chain — updateSellCalc(), transfer-ticket.js's own lookup) for an
+    // older caller that doesn't send it yet.
+    const royaltyPct = (typeof royaltyPercent === 'number') ? royaltyPercent : 10;
 
     const payoutBlock = `
         <table width="100%" cellpadding="0" cellspacing="0" style="background:#13110a;border:1px solid #2a2310;border-radius:6px;margin-bottom:24px">
           <tr><td style="padding:16px${hasPayoutMethod ? ';border-bottom:1px solid #1e1c14' : ''}">
             <div style="font-size:10px;color:#8a7f5c;letter-spacing:1.5px;text-transform:uppercase;font-family:monospace;margin-bottom:6px">You Receive</div>
             <div style="font-size:18px;font-weight:700;color:#c9a84c">${hasPayoutMath ? `$${netPayout.toFixed(2)}` : priceLine}</div>
-            ${hasPayoutMath ? `<div style="font-size:12px;color:#8a7f5c;margin-top:4px">Sale price ${priceLine} minus $${royaltyAmount.toFixed(2)} venue royalty (10%)</div>` : ''}
+            ${hasPayoutMath ? `<div style="font-size:12px;color:#8a7f5c;margin-top:4px">Sale price ${priceLine} minus $${royaltyAmount.toFixed(2)} venue royalty (${royaltyPct}%)</div>` : ''}
           </td></tr>
           ${hasPayoutMethod ? `<tr><td style="padding:16px">
             <div style="font-size:10px;color:#8a7f5c;letter-spacing:1.5px;text-transform:uppercase;font-family:monospace;margin-bottom:6px">Payout Method</div>
