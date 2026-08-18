@@ -1,4 +1,40 @@
 // api/resend-tickets.js
+//
+// v-next (Aug 2026) — SELF-SERVE SEARCH REBUILD: the buyer-facing "My
+// Tickets" search on a fresh session was originally just an email box —
+// looked up every valid ticket that email had for any upcoming (or recently
+// past) event at this venue and mailed all of it. Rebuilt per Joe's spec:
+//   1. EVENT-SCOPED: the client now sends a required `eventId` (populated
+//      from an upcoming-events dropdown). The self-serve branch verifies
+//      that event actually belongs to `venueId` AND hasn't passed yet
+//      before using it to scope every ticket query — same reasoning as the
+//      existing venueId-required fix below: a tampered eventId must not be
+//      able to pull tickets from another venue's event, or a past one. This
+//      replaces the old "all upcoming events + 30-day post-show window"
+//      scope entirely — that existed to compensate for not having a single
+//      event to scope to; now that a specific event is always selected,
+//      it's no longer needed.
+//   2. EMAIL *OR* PHONE: added a phone lookup path, mirroring the existing
+//      email path exactly (direct tickets.buyer_phone match, falling back
+//      to buyers.phone → buyer_id). Phone search doesn't know the
+//      destination email up front the way email search does — it's
+//      resolved from whichever record matches (the ticket's own
+//      buyer_email if present, else the buyers row's email). If a phone
+//      matches a buyer/ticket but no email is on file anywhere to send
+//      results to, that's treated as its own outcome (see below) rather
+//      than silently failing.
+//   3. EXPLICIT FOUND/NOT-FOUND MESSAGING: every response now carries a
+//      `message` string meant to be shown to the searcher directly, not
+//      just used internally. Previously the buyer-facing UI showed a
+//      deliberately vague "if tickets exist you'll receive them shortly"
+//      regardless of outcome — but the email side was never actually
+//      vague: sendNotFoundEmail() already told the searcher definitively
+//      that nothing was found. Making the on-screen message explicit just
+//      matches what the searcher was already being told by email; it
+//      doesn't newly expose anything.
+//   4. sendNotFoundEmail() now includes a contact-support line — it didn't
+//      have one before, and Joe's spec calls for a support path when a
+//      legitimate searcher can't be found.
 // NOTE: original filename unconfirmed — rename to match the actual repo file.
 //
 // v-next FIX (Aug 2026): the "View Ticket" button used
@@ -45,18 +81,20 @@ module.exports = async (req, res) => {
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-  const { email, venueUrl, venueId, ticketIds, overrideEmail, buyerName, phone, isManagerResend } = req.body;
+  const { email, venueUrl, venueId, ticketIds, overrideEmail, buyerName, phone, isManagerResend, eventId } = req.body;
 
-  const sendToEmail = (overrideEmail || email || '').trim().toLowerCase();
   const base = (venueUrl || 'https://theetestsite.eth.limo').replace(/\/+$/, '');
-
-  if (!sendToEmail) return res.status(400).json({ error: 'Missing email' });
 
   try {
     let tickets = [];
+    // Resolved per-branch below: manager resend and email search know this
+    // immediately; phone search resolves it from whichever record matches.
+    let sendToEmail = '';
 
     // ── MANAGER RESEND: specific ticket IDs + optional corrections ──────────
     if (isManagerResend && ticketIds && ticketIds.length) {
+      sendToEmail = (overrideEmail || email || '').trim().toLowerCase();
+      if (!sendToEmail) return res.status(400).json({ error: 'Missing email' });
 
       // 1. Apply corrections to tickets table using service key
       const updateBody = { buyer_email: sendToEmail };
@@ -102,84 +140,124 @@ module.exports = async (req, res) => {
       );
       tickets = await ticketsRes.json() || [];
 
-    // ── BUYER SELF-SERVE: look up by email ───────────────────────────────────
+    // ── BUYER SELF-SERVE: look up by email or phone, scoped to one event ────
     } else {
-      // FIX: this branch previously queried buyer_email with NO venue/event
-      // scoping at all — across a shared Supabase project serving multiple
-      // venues, this returned every valid ticket that email had EVER bought,
-      // anywhere. Confirmed via the buyer-facing "Can't find your tickets?"
-      // magic link (sendMagicLink() in club_chaotic_v2_11.html), which is the
-      // ONLY caller of this branch and never set isManagerResend.
-      // venueId is now REQUIRED here, not just used when present — a missing
-      // venueId on a future caller should fail loudly rather than silently
-      // falling back to an unscoped global lookup again.
+      // venueId REQUIRED — a missing venueId must fail loudly rather than
+      // silently falling back to an unscoped global lookup (this is the
+      // original cross-venue leak this branch was first hardened against).
       if (!venueId) {
         return res.status(400).json({ error: 'venueId is required for self-serve ticket lookup' });
       }
-      // v-next FIX (Joe, Aug 2026): scoped to upcoming events PLUS a 30-day
-      // post-show window — this was returning every valid ticket for every
-      // event this venue has EVER hosted, no date filtering at all. Simpler
-      // than event-based claim_tokens.expires_at (which would need each
-      // ticket in a batch to get its own expiry, since different tickets can
-      // be for different events with different dates): handled entirely here
-      // in the resend lookup instead. claim_tokens themselves stay
-      // effectively permanent (see farFutureExpiry equivalent below) — a
-      // buyer who already has a working link keeps it regardless of this
-      // window; this only controls whether a FRESH link gets resent for an
-      // old show. events.date is a plain date column (confirmed against
-      // dbRowToEvent() in the venue files) — "today" computed in UTC to
-      // match how the column is written and compared client-side.
-      const RESEND_POST_SHOW_WINDOW_DAYS = 30;
-      const cutoff = new Date();
-      cutoff.setUTCDate(cutoff.getUTCDate() - RESEND_POST_SHOW_WINDOW_DAYS);
-      const cutoffISO = cutoff.toISOString().slice(0, 10);
-      const evRes = await fetch(
-        `${supabaseUrl}/rest/v1/events?venue_id=eq.${encodeURIComponent(venueId)}&date=gte.${cutoffISO}&select=id`,
-        { headers }
-      );
-      const evRows = await evRes.json() || [];
-      const eventIdFilter = evRows.map(e => e.id);
-      if (!eventIdFilter.length) {
-        // Venue has no events at all — nothing to find, skip the ticket queries entirely
-        await sendNotFoundEmail(sendToEmail);
-        return res.status(200).json({ success: true, ticketsFound: 0, message: 'No tickets found for this email.' });
+      // eventId REQUIRED — the client's event dropdown always sends one now;
+      // see the v-next block at the top of this file for why the old
+      // "all upcoming + 30-day window" scope was replaced with this.
+      if (!eventId) {
+        return res.status(400).json({ error: 'eventId is required for self-serve ticket lookup' });
       }
-      const eventScope = `&event_id=in.(${eventIdFilter.map(id => `"${id}"`).join(',')})`;
+      const searchEmail = (email || '').trim().toLowerCase();
+      const searchPhone = (phone || '').trim();
+      if (!searchEmail && !searchPhone) {
+        return res.status(400).json({ error: 'Provide an email or phone number to search' });
+      }
 
-      // First try buyer_email column directly on tickets (new purchases)
-      const directRes = await fetch(
-        `${supabaseUrl}/rest/v1/tickets?buyer_email=eq.${encodeURIComponent(sendToEmail)}&status=eq.valid${eventScope}&select=id,seat,event_id,event_name,tier_name,price,payment,status`,
+      // Verify eventId actually belongs to this venue AND hasn't passed yet —
+      // do not trust the client-sent eventId blindly. Mirrors the venueId
+      // fix above: a tampered eventId must not pull tickets from another
+      // venue's event, or from a past one the dropdown was never supposed
+      // to offer. "today" computed in UTC to match how events.date is
+      // written and compared client-side (same convention as the rest of
+      // this file).
+      const todayISO = new Date().toISOString().slice(0, 10);
+      const evCheckRes = await fetch(
+        `${supabaseUrl}/rest/v1/events?id=eq.${encodeURIComponent(eventId)}&venue_id=eq.${encodeURIComponent(venueId)}&date=gte.${todayISO}&select=id`,
         { headers }
       );
-      tickets = await directRes.json() || [];
+      const evCheckRows = await evCheckRes.json() || [];
+      if (!evCheckRows.length) {
+        return res.status(400).json({ error: 'Event not found for this venue, or it has already passed' });
+      }
+      const eventScope = `&event_id=eq.${encodeURIComponent(eventId)}`;
+      const TICKET_FIELDS = 'id,seat,event_id,event_name,tier_name,price,payment,status';
 
-      // Fall back to buyers table → buyer_id lookup (legacy purchases)
-      if (!tickets.length) {
-        const buyerRes = await fetch(
-          `${supabaseUrl}/rest/v1/buyers?email=eq.${encodeURIComponent(sendToEmail)}&select=id`,
+      if (searchEmail) {
+        sendToEmail = searchEmail;
+
+        // First try buyer_email column directly on tickets (new purchases)
+        const directRes = await fetch(
+          `${supabaseUrl}/rest/v1/tickets?buyer_email=eq.${encodeURIComponent(searchEmail)}&status=eq.valid${eventScope}&select=${TICKET_FIELDS}`,
           { headers }
         );
-        const buyers = await buyerRes.json() || [];
-        if (buyers.length) {
-          const buyerIds = buyers.map(b => `"${b.id}"`).join(',');
-          const ticketsRes = await fetch(
-            `${supabaseUrl}/rest/v1/tickets?buyer_id=in.(${buyerIds})&status=eq.valid${eventScope}&select=id,seat,event_id,event_name,tier_name,price,payment,status`,
+        tickets = await directRes.json() || [];
+
+        // Fall back to buyers table → buyer_id lookup (legacy purchases)
+        if (!tickets.length) {
+          const buyerRes = await fetch(
+            `${supabaseUrl}/rest/v1/buyers?email=eq.${encodeURIComponent(searchEmail)}&select=id`,
             { headers }
           );
-          tickets = await ticketsRes.json() || [];
+          const buyers = await buyerRes.json() || [];
+          if (buyers.length) {
+            const buyerIds = buyers.map(b => `"${b.id}"`).join(',');
+            const ticketsRes = await fetch(
+              `${supabaseUrl}/rest/v1/tickets?buyer_id=in.(${buyerIds})&status=eq.valid${eventScope}&select=${TICKET_FIELDS}`,
+              { headers }
+            );
+            tickets = await ticketsRes.json() || [];
+          }
+        }
+      } else {
+        // Phone search — mirrors the email path exactly, but the destination
+        // email isn't known up front. Resolve it from whichever record
+        // matches: the ticket's own buyer_email first, else the buyers row.
+        const directRes = await fetch(
+          `${supabaseUrl}/rest/v1/tickets?buyer_phone=eq.${encodeURIComponent(searchPhone)}&status=eq.valid${eventScope}&select=${TICKET_FIELDS},buyer_email`,
+          { headers }
+        );
+        const directRows = await directRes.json() || [];
+        if (directRows.length) {
+          sendToEmail = (directRows.find(t => t.buyer_email)?.buyer_email || '').toLowerCase();
+          tickets = directRows.map(({ buyer_email, ...t }) => t);
+        } else {
+          const buyerRes = await fetch(
+            `${supabaseUrl}/rest/v1/buyers?phone=eq.${encodeURIComponent(searchPhone)}&select=id,email`,
+            { headers }
+          );
+          const buyers = await buyerRes.json() || [];
+          if (buyers.length) {
+            sendToEmail = (buyers.find(b => b.email)?.email || '').toLowerCase();
+            const buyerIds = buyers.map(b => `"${b.id}"`).join(',');
+            const ticketsRes = await fetch(
+              `${supabaseUrl}/rest/v1/tickets?buyer_id=in.(${buyerIds})&status=eq.valid${eventScope}&select=${TICKET_FIELDS}`,
+              { headers }
+            );
+            tickets = await ticketsRes.json() || [];
+          }
+        }
+        if (tickets.length && !sendToEmail) {
+          // Matched a phone number (and found valid tickets for this event)
+          // but there's no email on file anywhere to send results to. Can't
+          // fulfill "email sent with the tickets" without one — this is a
+          // distinct outcome from "not found", so it gets its own message
+          // rather than silently falling through to the not-found email
+          // (which would have nowhere to send to either).
+          return res.status(200).json({
+            success: true,
+            ticketsFound: 0,
+            message: 'Found a match, but no email is on file for this phone number — contact support to get your tickets.',
+          });
         }
       }
     }
 
     // ── No tickets found ─────────────────────────────────────────────────────
     if (!tickets.length) {
-      if (!isManagerResend) await sendNotFoundEmail(sendToEmail);
+      if (!isManagerResend && sendToEmail) await sendNotFoundEmail(sendToEmail);
       return res.status(200).json({
         success: true,
         ticketsFound: 0,
         message: isManagerResend
           ? 'Buyer info updated but no valid tickets found to send.'
-          : 'No tickets found for this email.',
+          : 'No tickets found for that event with this email or phone number — contact support if you believe this is wrong.',
       });
     }
 
@@ -274,7 +352,14 @@ module.exports = async (req, res) => {
       return res.status(500).json({ error: 'Failed to send email', detail: error.message });
     }
 
-    return res.status(200).json({ success: true, ticketsFound: ticketLinks.length, emailId: data.id });
+    return res.status(200).json({
+      success: true,
+      ticketsFound: ticketLinks.length,
+      emailId: data.id,
+      message: isManagerResend
+        ? `${ticketLinks.length} ticket${ticketLinks.length > 1 ? 's' : ''} resent.`
+        : `Found ${ticketLinks.length} ticket${ticketLinks.length > 1 ? 's' : ''} — check your email!`,
+    });
 
   } catch (err) {
     console.error('resend-tickets error:', err);
@@ -297,7 +382,7 @@ async function sendNotFoundEmail(email) {
           <div style="background:#12121a;border:1px solid #2a2a3a;border-radius:12px;padding:32px;text-align:center;">
             <div style="font-size:32px;margin-bottom:16px;">🎫</div>
             <div style="font-size:18px;color:#ffffff;margin-bottom:12px;">No tickets found</div>
-            <div style="font-size:14px;color:#9090b0;line-height:1.6;">We couldn't find any active tickets for this email address.<br><br>If you used a different email at checkout, please try again with that address.</div>
+            <div style="font-size:14px;color:#9090b0;line-height:1.6;">We couldn't find any active tickets for this email address for that event.<br><br>If you used a different email at checkout, please try the search again with that address. Still no luck? <a href="mailto:support@octicketslive.com" style="color:#d4af37;">Contact support</a> and we'll help track it down.</div>
           </div>
           <div style="text-align:center;margin-top:24px;"><div style="font-size:11px;color:#555570;">OC Tickets Live · Powered by Ethereum</div></div>
         </div></body></html>`
