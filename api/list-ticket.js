@@ -76,6 +76,24 @@
 // (server-side only), so this endpoint is the authority — the browser has
 // no code path left that can write any of these three actions directly.
 //
+// FIX (Aug 19 2026): CANCEL-CONFIRM PAYOUTS CLEANUP. handleConfirmListing
+// below inserts a `payouts` row at the moment a listing is confirmed —
+// before any sale has happened — with payout_status: 'pending'. Cancelling
+// that listing (this section) previously only cleared payout_method/
+// payout_handle/payout_status on the TICKET row; it never touched the
+// separate payouts row confirm-listing had created, so a cancelled listing
+// left a phantom "pending" payout behind forever, indistinguishable from a
+// real one owed to a real seller. Confirmed via direct query against live
+// data (Aug 19 2026): 6 of 27 rows currently sitting at
+// payout_status='pending' were exactly this — cancelled listings, nobody
+// owed anything, never cleaned up. handleCancelConfirm now deletes the
+// matching payouts row(s) as part of a successful cancellation. Scoped
+// defensively to payout_status='pending' AND resale_confirmed_at IS NULL
+// (see transfer-ticket.js's companion fix, same date) — a row that's
+// genuinely been sale-confirmed shouldn't be reachable from a ticket that's
+// still 'listed' in the first place, but the guard costs nothing. See that
+// block below for the full note.
+//
 // ── DEPLOYMENT NOTES ────────────────────────────────────────────────────
 // Env var names (SUPABASE_URL / SUPABASE_SERVICE_KEY) and CORS handling
 // confirmed against this repo's actual transfer-ticket.js/refund-stripe.js
@@ -762,6 +780,31 @@ async function handleCancelConfirm(req, res) {
       success: false,
       error: 'Could not cancel this listing — its status changed before confirmation completed.',
     });
+  }
+
+  // FIX (Aug 19 2026): clean up the payouts row(s) confirm-listing created
+  // for this ticket at listing time. Previously this path only cleared
+  // payout_method/payout_handle/payout_status on the TICKET row above — it
+  // never touched the separate `payouts` table row, which was left sitting
+  // at payout_status='pending' forever with nothing to distinguish it from
+  // a real, currently-owed payout. Confirmed via direct query against live
+  // data (Aug 19 2026): 6 of 27 rows at payout_status='pending' were
+  // exactly this. Scoped defensively — only deletes rows that are still
+  // pending AND have no resale_confirmed_at (see transfer-ticket.js's
+  // companion fix, same date): a row that's genuinely been sale-confirmed
+  // shouldn't be reachable from a ticket that's still 'listed' in the
+  // first place, but the guard costs nothing. Fire-and-log: the
+  // cancellation above has already succeeded and is what matters to the
+  // caller — a cleanup failure here shouldn't turn a successful
+  // cancellation into an error response.
+  const { error: payoutCleanupErr } = await supabase
+    .from('payouts')
+    .delete()
+    .eq('ticket_id', ticketId)
+    .eq('payout_status', 'pending')
+    .is('resale_confirmed_at', null);
+  if (payoutCleanupErr) {
+    console.warn('cancel-confirm: failed to clean up payouts row(s) for', ticketId, payoutCleanupErr.message);
   }
 
   return res.status(200).json({ success: true, ticket: updated });
