@@ -98,6 +98,58 @@
 // event's actual rate, but the percentage printed alongside them will still
 // read "(10%)" regardless of what that rate actually is. Logged, not fixed
 // here — separate file.
+//
+// FIX (Aug 19 2026): VENUE PAYOUT NOTIFICATION. Nothing previously told the
+// venue a resale had even happened — the seller's "sold" email above was the
+// only signal generated, and it goes to the seller, not the venue. Venue
+// awareness depended entirely on someone remembering to open the admin
+// Payouts tab. This adds a second, independent notification fired from the
+// same completed-transfer event: an email to the venue's own
+// contact_payout_email (new `venues` table, keyed on the same venue_id
+// already present on `events` — confirmed populated for all three current
+// venues via direct Supabase inspection, Aug 19 2026) telling them a resale
+// completed and exactly what they now owe the seller and how to pay them.
+//
+// Deliberately a SEPARATE sendEmailSafe() call, not folded into the seller
+// email above: different recipient, different content, and — importantly —
+// independent failure. A missing or bad venue contact address should never
+// prevent the seller from getting their own confirmation, and vice versa.
+// Also deliberately NOT nested inside `if (sellerEmail)` — the venue needs
+// to know money is owed regardless of whether the seller themselves is
+// reachable.
+//
+// venue_id is read off the SAME events row already being queried for
+// royalty_percent (one extra selected column, no additional round trip).
+// The venues lookup itself is a second, genuinely separate query — non-fatal
+// if it errors or finds nothing, same fire-and-log posture as the existing
+// payout_method/payout_handle lookup just below it. Skips (with a console
+// warning, not a thrown error) if: the venue has no row yet, its
+// contact_payout_email is unset, or resalePrice/netPayout never resolved
+// (a notice with no dollar amount isn't actionable and would just confuse).
+//
+// CURRENT STATE (Aug 19 2026): the `venues` table exists with all three
+// venue_id rows (theetestsite, concerttix, tickets4sale) but every
+// contact_payout_email is still NULL — nobody has filled them in yet. That
+// makes this change safe to deploy immediately: with no address on file,
+// every venue notice attempt logs a warning and no-ops. Nothing sends to
+// nobody, and nothing sends to a wrong address. Emails start flowing the
+// moment each venue row gets a real contact_payout_email set.
+//
+// STILL REQUIRED, NOT DONE HERE: api/send.js needs a new branch for
+// `type: 'venue_payout_notice'` (name chosen here, trivially renameable) —
+// this file only builds and dispatches the payload below, same division of
+// responsibility as the existing `type: 'sold'` branch. Proposed payload
+// shape, all fields already computed above and simply reused:
+//   { type: 'venue_payout_notice', email: <venue's contact_payout_email>,
+//     ticketId, seat: soldSeat, eventName: soldEventName, sellerName,
+//     resalePrice, royaltyAmount, royaltyPercent, netPayout, payoutMethod,
+//     payoutHandle, venueUrl }
+// netPayout is the one figure that actually matters for action — it's the
+// dollar amount the venue now owes the seller. royaltyAmount is what the
+// venue keeps; it's included for context, not as the headline number.
+// send.js's own template/subject-line conventions weren't in hand at the
+// time of this change, so that branch isn't written here — this file was
+// not guessed at without the source to verify against.
 
 const { createClient } = require('@supabase/supabase-js');
 const crypto = require('crypto');
@@ -199,16 +251,22 @@ module.exports = async (req, res) => {
     // pattern as the payout_method/payout_handle read further down — a
     // failed lookup or a missing value falls back to 10, matching both the
     // DB column's own default and updateSellCalc()'s client-side fallback.
+    //
+    // Aug 19 2026: also now selects venue_id in this same query — needed for
+    // the venue payout-notification lookup below. One extra column, no
+    // additional round trip.
     let royaltyPercent = 10;
+    let venueId = null;
     try {
       const { data: eventRow } = await supabase
         .from('events')
-        .select('royalty_percent')
+        .select('royalty_percent, venue_id')
         .eq('id', preTransfer?.event_id)
         .maybeSingle();
       if (eventRow && eventRow.royalty_percent != null) royaltyPercent = Number(eventRow.royalty_percent);
+      if (eventRow && eventRow.venue_id) venueId = eventRow.venue_id;
     } catch (royaltyLookupErr) {
-      console.warn('transfer-ticket: royalty_percent lookup failed for', ticketId, royaltyLookupErr.message);
+      console.warn('transfer-ticket: royalty_percent/venue_id lookup failed for', ticketId, royaltyLookupErr.message);
     }
 
     const royaltyAmount = typeof resalePrice === 'number' ? resalePrice * (royaltyPercent / 100) : null;
@@ -262,6 +320,31 @@ module.exports = async (req, res) => {
       .eq('id', ticketId)
       .single();
 
+    // payout_method/payout_handle are needed by BOTH the seller's "sold"
+    // email and the venue payout notice below. Hoisted here and looked up
+    // once, unconditionally — this used to live inside the `if (sellerEmail)`
+    // block below, which meant a seller with no email on file would also
+    // silently suppress the venue notice. That's backwards: the venue needs
+    // to know money is owed regardless of whether the seller is reachable.
+    // Non-fatal if it finds nothing. This ticket's listing (list-ticket.js
+    // confirm-listing) already created this row.
+    let payoutMethod = null, payoutHandle = null;
+    try {
+      const { data: payoutRow } = await supabase
+        .from('payouts')
+        .select('payout_method, payout_handle')
+        .eq('ticket_id', ticketId)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (payoutRow) {
+        payoutMethod = payoutRow.payout_method;
+        payoutHandle = payoutRow.payout_handle;
+      }
+    } catch (payoutLookupErr) {
+      console.warn('transfer-ticket: payout lookup failed for', ticketId, payoutLookupErr.message);
+    }
+
     // ── Seller notification: always sent, combined with remaining tickets
     // when there are any. Fire-and-log — the transfer has already fully
     // succeeded by this point, an email failure here shouldn't undo any of
@@ -275,26 +358,6 @@ module.exports = async (req, res) => {
           .eq('tx_hash', oldTxHash)
           .neq('id', ticketId);
         remaining = remainingRows || [];
-      }
-
-      // Optional nicety, non-fatal if it finds nothing: tell the seller how
-      // they're being paid, not just that a sale happened. This ticket's
-      // listing (list-ticket.js confirm-listing) already created this row.
-      let payoutMethod = null, payoutHandle = null;
-      try {
-        const { data: payoutRow } = await supabase
-          .from('payouts')
-          .select('payout_method, payout_handle')
-          .eq('ticket_id', ticketId)
-          .order('created_at', { ascending: false })
-          .limit(1)
-          .maybeSingle();
-        if (payoutRow) {
-          payoutMethod = payoutRow.payout_method;
-          payoutHandle = payoutRow.payout_handle;
-        }
-      } catch (payoutLookupErr) {
-        console.warn('transfer-ticket: payout lookup failed for', ticketId, payoutLookupErr.message);
       }
 
       await sendEmailSafe({
@@ -316,6 +379,51 @@ module.exports = async (req, res) => {
       });
     } else {
       console.warn('transfer-ticket: no seller email on file for', ticketId, '— sold notification skipped');
+    }
+
+    // ── Venue payout notification (Aug 19 2026): fully independent of the
+    // seller email/notification above — runs whether or not sellerEmail
+    // exists, and whether or not the seller's own email succeeded or
+    // failed. Reuses payoutMethod/payoutHandle from the hoisted lookup
+    // above rather than querying `payouts` twice. See header note for why
+    // this is a separate sendEmailSafe() call and what still needs to be
+    // added to send.js.
+    if (typeof netPayout === 'number' && venueId) {
+      try {
+        const { data: venueRow, error: venueLookupErr } = await supabase
+          .from('venues')
+          .select('contact_payout_email')
+          .eq('venue_id', venueId)
+          .maybeSingle();
+
+        if (venueLookupErr) {
+          console.warn('transfer-ticket: venues lookup failed for', ticketId, venueLookupErr.message);
+        } else if (venueRow && venueRow.contact_payout_email) {
+          await sendEmailSafe({
+            type: 'venue_payout_notice',
+            email: venueRow.contact_payout_email,
+            ticketId,
+            seat: soldSeat,
+            eventName: soldEventName,
+            sellerName,
+            resalePrice,
+            royaltyAmount,
+            royaltyPercent,
+            netPayout,
+            payoutMethod,
+            payoutHandle,
+            venueUrl,
+          });
+        } else {
+          // Expected and harmless today — every venue's contact_payout_email
+          // is still unset as of Aug 19 2026. Not an error, just unconfigured.
+          console.warn('transfer-ticket: no contact_payout_email on file for venue', venueId, '— venue notice skipped for', ticketId);
+        }
+      } catch (venueNoticeErr) {
+        console.warn('transfer-ticket: venue payout notice failed for', ticketId, venueNoticeErr.message);
+      }
+    } else if (!venueId) {
+      console.warn('transfer-ticket: could not resolve venue_id for event', preTransfer?.event_id, '— venue notice skipped for', ticketId);
     }
 
     return res.status(200).json({ success: true, ticket, txHash });
