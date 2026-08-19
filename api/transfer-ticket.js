@@ -135,6 +135,17 @@
 // nobody, and nothing sends to a wrong address. Emails start flowing the
 // moment each venue row gets a real contact_payout_email set.
 //
+// FIX (Aug 19 2026): RESALE_CONFIRMED_AT. Discovered while designing the
+// venue notice above: the `payouts` row list-ticket.js creates at LISTING
+// time sets payout_status='pending' immediately, before any sale, and
+// nothing ever clears it if the listing is cancelled instead of sold —
+// verified against live data, most "pending" rows in the table did not
+// correspond to an actual sale. This file now stamps resale_confirmed_at
+// on the payout row at the one moment it actually has the authority to
+// say so — a confirmed, paid transfer. See the payout lookup block below
+// for the full note. Companion fix in list-ticket.js's cancel-confirm
+// cleans up the rows this file's absence of a stamp was masking.
+//
 // STILL REQUIRED, NOT DONE HERE: api/send.js needs a new branch for
 // `type: 'venue_payout_notice'` (name chosen here, trivially renameable) —
 // this file only builds and dispatches the payload below, same division of
@@ -328,21 +339,54 @@ module.exports = async (req, res) => {
     // to know money is owed regardless of whether the seller is reachable.
     // Non-fatal if it finds nothing. This ticket's listing (list-ticket.js
     // confirm-listing) already created this row.
+    //
+    // FIX (Aug 19 2026): also stamps resale_confirmed_at on that same row.
+    // payout_status alone can't distinguish "actually sold, money now due"
+    // from "listed, never sold" or "listed then cancelled" — it's set to
+    // 'pending' by list-ticket.js's confirm-listing at LISTING time, before
+    // any sale, and nothing clears it if the listing is later cancelled
+    // instead of sold. Confirmed via direct query against live data: of 27
+    // rows sitting at payout_status='pending' as of Aug 19 2026, only 11
+    // corresponded to a ticket that had actually resold; the rest were
+    // cancelled listings, still-unsold listings, or rows referencing
+    // tickets that no longer exist. resale_confirmed_at is the new,
+    // unambiguous signal — set here, once, ONLY on an actual confirmed
+    // paid transfer, nowhere else. Any future reminder job (or any query
+    // asking "is money actually owed right now") should filter on
+    // resale_confirmed_at IS NOT NULL, not on payout_status alone.
+    // Requires: ALTER TABLE payouts ADD COLUMN IF NOT EXISTS
+    // resale_confirmed_at timestamptz; (already applied directly in
+    // Supabase, Aug 19 2026 — not applied by this file).
     let payoutMethod = null, payoutHandle = null;
     try {
       const { data: payoutRow } = await supabase
         .from('payouts')
-        .select('payout_method, payout_handle')
+        .select('id, payout_method, payout_handle')
         .eq('ticket_id', ticketId)
         .order('created_at', { ascending: false })
         .limit(1)
         .maybeSingle();
+
       if (payoutRow) {
         payoutMethod = payoutRow.payout_method;
         payoutHandle = payoutRow.payout_handle;
+
+        const { error: confirmErr } = await supabase
+          .from('payouts')
+          .update({ resale_confirmed_at: new Date().toISOString() })
+          .eq('id', payoutRow.id);
+        if (confirmErr) {
+          console.warn('transfer-ticket: failed to stamp resale_confirmed_at for payout', payoutRow.id, confirmErr.message);
+        }
+      } else {
+        // Not necessarily a bug — but worth knowing about. A resale
+        // completing with no matching payouts row means either this ticket
+        // predates the payouts table, or list-ticket.js's confirm-listing
+        // failed to create one when it should have.
+        console.warn('transfer-ticket: no payouts row found for ticket', ticketId, '— nothing to mark as sold.');
       }
     } catch (payoutLookupErr) {
-      console.warn('transfer-ticket: payout lookup failed for', ticketId, payoutLookupErr.message);
+      console.warn('transfer-ticket: payout lookup/stamp failed for', ticketId, payoutLookupErr.message);
     }
 
     // ── Seller notification: always sent, combined with remaining tickets
