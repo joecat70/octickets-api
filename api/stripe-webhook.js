@@ -237,10 +237,59 @@ module.exports = async (req, res) => {
       return res.status(200).json({ received: true, confirmed: actuallyValid.length, attempted: holdIds.length });
     }
 
-    // ── No hold_ids — log and return ───────────────────────────────────────
-    // OCTL concert flow always uses holds. If hold_ids are missing the client
-    // will handle ticket creation on Stripe return. Log for debugging only.
-    console.warn('Webhook: no hold_ids in metadata — client will handle ticket write:', sessionId);
+    // ── No hold_ids: exchange/resale purchase, or (unexpectedly) a primary
+    // purchase whose client never created holds ─────────────────────────────
+    // FIX (Aug 2026): exchange purchases never send hold_ids at all (only
+    // primary reserved-seat purchases create holds), so this branch used to
+    // just log a warning and stop — meaning the ONLY thing that ever
+    // completed a resale was handleExchangeStripeReturn running client-side.
+    // If the buyer's browser never made it back there (crash, closed tab,
+    // dead domain), nothing ever transferred ownership, notified the
+    // seller, or gave the buyer a working ticket, and nothing would ever
+    // retry it. transfer-ticket.js already does all of that work correctly
+    // (royalty math, TOTP rotation, claim-token expiry, seller + venue
+    // emails) — call it the same way sendConfirmationEmail below self-calls
+    // /api/send, rather than duplicating that logic here. Safe to call even
+    // if the client also reaches it: transfer-ticket.js now has its own
+    // idempotency guard (checks tx_hash before doing any work), added
+    // alongside this change specifically so this call and the client's call
+    // can race safely.
+    if (meta.is_exchange === 'true' && meta.resale_ticket_id) {
+      console.log('Webhook: exchange purchase, no hold_ids — calling transfer-ticket for', meta.resale_ticket_id, sessionId);
+      try {
+        const baseUrl = process.env.VERCEL_URL
+          ? `https://${process.env.VERCEL_URL}`
+          : 'https://octickets-api.vercel.app';
+        const transferRes  = await fetch(`${baseUrl}/api/transfer-ticket`, {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ticketId:   meta.resale_ticket_id,
+            sessionId,
+            buyerEmail: email      || null,
+            buyerName:  buyerName  || null,
+            buyerPhone: buyerPhone || null,
+            payment,
+            venueUrl,
+          }),
+        });
+        const transferData = await transferRes.json();
+        if (!transferRes.ok || !transferData.success) {
+          console.error('Webhook: transfer-ticket call failed for', meta.resale_ticket_id, sessionId, transferData.error || transferRes.status);
+        } else {
+          console.log('Webhook: ✓ transfer-ticket completed for', meta.resale_ticket_id, sessionId, transferData.alreadyCompleted ? '(already done by a prior call)' : '');
+        }
+      } catch (transferErr) {
+        console.error('Webhook: transfer-ticket call exception for', meta.resale_ticket_id, sessionId, transferErr.message);
+      }
+      return res.status(200).json({ received: true });
+    }
+
+    // ── No hold_ids and not an exchange — log and return ────────────────────
+    // OCTL concert flow always uses holds for primary purchases. If we get
+    // here, something unexpected happened (client never created holds). Log
+    // for debugging only — no automatic recovery for this specific case.
+    console.warn('Webhook: no hold_ids in metadata and not an exchange — client will handle ticket write:', sessionId);
     return res.status(200).json({ received: true });
 
   } catch (err) {
