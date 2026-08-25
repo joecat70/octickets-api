@@ -299,6 +299,16 @@ module.exports = async (req, res) => {
         const cancelUrl  = `${venueUrl}/#stripe_cancel=true`;
 
         const metadata = {
+            // FIX (Aug 2026): venueUrl was already destructured from the request
+            // body above and used for successUrl/cancelUrl, but was never copied
+            // into metadata — so stripe-webhook.js, which reads it back via
+            // session.metadata.venue_url, always fell through to its hardcoded
+            // default (Live Demo's URL) regardless of which venue the purchase
+            // actually came from. Confirmed all six real session-creation call
+            // sites across all three venue files (primary + exchange, each)
+            // already send venueUrl in the request body — this was purely a
+            // server-side gap, no client-side changes needed.
+            venue_url:       (venueUrl     || '').slice(0, 500),
             event_id:        (eventId      || '').slice(0, 500),
             event_name:      (eventName    || '').slice(0, 500),
             buyer_name:      (buyerName    || '').slice(0, 500),
