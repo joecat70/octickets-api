@@ -232,6 +232,27 @@ module.exports = async (req, res) => {
     if (preFetchErr || !preTransfer) {
       console.error('transfer-ticket: could not read pre-transfer ticket state for', ticketId, preFetchErr && preFetchErr.message);
     }
+
+    // FIX (Aug 2026): IDEMPOTENCY GUARD. This endpoint can legitimately be
+    // called twice for the same purchase — the client
+    // (handleExchangeStripeReturn) and the Stripe webhook can both reach it
+    // in a race (the webhook now also calls this endpoint for exchange
+    // sessions, added alongside this fix), and Stripe itself sometimes
+    // retries webhook deliveries regardless. Without this check, a second
+    // call would: rotate totp_seed AGAIN, silently invalidating the QR the
+    // buyer is already looking at moments after getting it; and read
+    // "seller" info from a ticket row the FIRST call already overwrote to
+    // the NEW buyer — sending the "your ticket sold" email to the person
+    // who just bought it, about their own new ticket. If this ticket's
+    // tx_hash already matches this exact session, the transfer already
+    // completed (by an earlier call, from either caller) — return success
+    // and do nothing else.
+    if (preTransfer?.tx_hash === txHash) {
+      console.log('transfer-ticket: already completed for this session (a prior call — client or webhook — got here first) —', ticketId, sessionId);
+      const { data: alreadyTransferred } = await supabase.from('tickets').select('*').eq('id', ticketId).single();
+      return res.status(200).json({ success: true, ticket: alreadyTransferred, txHash, alreadyCompleted: true });
+    }
+
     const sellerEmail = preTransfer?.buyer_email || null;
     const sellerName = preTransfer?.buyer_name || 'Guest';
     const oldTxHash = preTransfer?.tx_hash || null;
