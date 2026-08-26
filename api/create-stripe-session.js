@@ -239,6 +239,17 @@ module.exports = async (req, res) => {
             ['tier1', 'tier2', 'tier3'].forEach(t => {
                 if (sec[t] && typeof sec[t].price === 'number') allowedPricesCents.add(Math.round(sec[t].price * 100));
             });
+            // Bailey Hall (Aug 2026): variable-tier-count sections store their tiers as
+            // sec.tiers = [{price, rowEnd}, ..., {price}] (array, any length) instead of
+            // the fixed sec.tier1/tier2/tier3 keys checked above — that's what makes tier
+            // COUNT adjustable per section from the admin file, not just tier price. Purely
+            // additive: every existing venue's events have no `tiers` array on any section,
+            // so this loop never runs for them and the two checks above are untouched.
+            if (Array.isArray(sec.tiers)) {
+                sec.tiers.forEach(t => {
+                    if (t && typeof t.price === 'number') allowedPricesCents.add(Math.round(t.price * 100));
+                });
+            }
         });
     }
 
