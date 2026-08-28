@@ -4,7 +4,63 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Club Chaotic — Venue Admin</title>
-<!-- chaotic_admin v2.4 -->
+<!-- chaotic_admin v2.16 | LEGAL CAPACITY CEILING ON ADD EVENT. Joe's
+framing: a promoter should be free to sell FEWER tickets than the room
+holds (an exclusive night), but never more than the venue's actual legal/
+fire-code capacity — that's not a per-show decision OCTL should be in the
+business of allowing around. The Capacity field in the Add Event wizard
+already existed and already saved correctly to max_entrants (blank =
+null = sell the full room, unchanged); what was missing was any ceiling
+on it at all — a typo or an over-optimistic promoter could enter any
+number.
+New const VENUE_LEGAL_CAPACITY = 750, matching the customer-facing file's
+own GA_CAPACITY, deliberately NOT exposed in the wizard — same category
+of fact as the venue's name or address, a one-time thing to change if
+this file is ever cloned as a template for a different room, never a
+per-event input. validateAE() now rejects (not silently clamps) any
+entered capacity above that ceiling or at/below zero, with a message
+that says why, at the same Step-1-to-Step-2 validation gate name/date/
+price already go through. Summary screen now shows "Full room (750)"
+instead of an ambiguous em-dash when the field was left blank.
+NOT part of this change, and still needed separately: club_chaotic_v3_0
+.html's own GA availability math (ticket qty selector, "X remaining",
+SOLD OUT gating) runs entirely off its own hardcoded GA_CAPACITY and
+never reads max_entrants at all — so today, this validation stops bad
+data from being saved, but doesn't yet stop an oversell at the point of
+actual sale if bad data ever got into max_entrants some other way. That
+file needs its own clamp against the same legal number to actually close
+the loop. -->
+<!-- chaotic_admin v2.15 | CROSS-VENUE PII LEAK FIXED — Customers and
+Exceptions: the two leaks left open since v2.8, closed now on Joe's
+go-ahead (Aug 2026). Both queried their shared table with NO venue filter
+at all — loadCustomerData() pulled every venue's tickets table rows, then
+looked up full buyer PII (phone, zip_code, age_range, referral_source,
+opt_in flags, not just name/email) for any buyer who'd ever purchased from
+ANY venue on the shared Supabase project; loadExceptionRequests() pulled
+every venue's transfer-restriction exception requests, including
+requestor/recipient phone numbers. Customers was the more serious half —
+this is the leak the v2.8 note specifically called out as including
+cross-venue buyer PII. Same fix pattern already proven in loadPayouts()
+at v2.8: scope to `.in('event_id', <this venue's own event ids>)`, sourced
+from EVENTS (lazy-loaded via `.eq('venue_id', VENUE_ID)` if not already
+populated), with the same `['__none__']` fallback so an empty event list
+produces zero rows rather than an accidentally-unfiltered IN clause.
+Royalty Revenue was already covered — it renders from the same
+already-scoped _allPayouts loadPayouts() populates, not a separate query,
+so nothing there needed touching.
+-->
+<!-- chaotic_admin v2.14 | SALE_START TIMEZONE FIX: same bug found and fixed
+in artscenter_admin v1.4 and casino_admin v1.4 — sale_start was built as a
+naive datetime string with no timezone conversion and sent straight to
+Supabase, which stored the local time entered as if it were already UTC.
+A show whose sale was meant to open hours from now would show as opening
+in minutes instead. Fixed by wrapping in new Date(...).toISOString() to
+convert from local browser time to real UTC before it's sent. This file
+has no local doors_open/.toISOString() reference to point to like the
+other two admins had — same fix applies regardless. No other field
+touched.
+-->
+<!-- chaotic_admin v2.13 | MODEL C v3 ENGINE PROPAGATION: the embedded calcOCTLFees() is replaced with the CANONICAL v3 block — byte-identical (md5 0706d4e781) across club_chaotic, coral_springs, chaotic_admin, casino_admin and artscenter_admin, and behaviourally identical to lib/calcOCTLFees.js on the server (verified: 200,000 comparisons, 0 differences). The v2 copy this replaces had three defects: (1) independent rounding, so stripe+octl+venue did NOT sum to the service fee in ~1/3 of prices; (2) OCTL's take capped against the RAW pool then rounded, which could push venueNet to -$0.01; (3) inconsistent guards, and paymentMethod compared with ===, so the "Crypto Wallet" string the tickets table stores was treated as CARD and charged a phantom Stripe fee. v3 rounds independents and derives dependents as remainders, caps OCTL after rounding, never throws, and normalises paymentMethod by regex. Returns BOTH allInPrice and allIn (aliases) so the same block drops into every file without touching call sites. DO NOT edit this engine in one file only: change lib/calcOCTLFees.js first, run `node lib/calcOCTLFees.test.js` (must print ALL INVARIANTS HOLD - 0 failures), then re-propagate everywhere. Also removed the P&L's local ZERO_SPLIT null-guard (v3 never returns null, and it collided with the engine's own ZERO_SPLIT), and the venue-share remainder workaround is no longer a workaround — v3 reconciles exactly, so it is now simply correct. Prior v2.12: The venue's rebate from the service fee is REMOVED from show revenue entirely. Model: the service fee goes 100% to OCTL; OCTL rebates a portion back to the venue for using the platform. That rebate is OCTL<->venue business, not a show cost or show revenue, so it does not belong in a P&L an artist or outside promoter settles against — it is out of Additional Revenue, Total Revenue, Net Profit and the export. (F&B/merch/other remain itemized: those CAN fall inside an outside-promoter agreement.) The "of which OCTL" memo line already carries the full post-Stripe fee, so nothing is hidden and nothing double-counts. venueFeeShare is still computed on the returned object for OCTL-side reconciliation, never rendered. Prior v2.11 SERVICE-FEE PRESENTATION: the ↳ Stripe and ↳ OCTL memo lines are KEPT, but the ↳ venue line is REMOVED and its amount FOLDED INTO the OCTL line (octlShown = octlTake + venueFeeShare), so the fee reads as Stripe + OCTL with no venue cut visible. The Show P&L is a settlement document an artist or agent may read, and showing the venue taking a slice of the service fee directly above the artist's split base invites an argument that serves no one. It now reads as a single "Less: OCTL service fee" line that leaves the building. The venue's share is unchanged and still flows to Additional Revenue (Joe, Jul 13 2026). Prior v2.9 | MODEL C P&L FIX: the Show P&L still treated the service fee as a separately-collected amount (summing tier1_fee, which Model C writes as 0 -> "Service fees collected $0.00") and subtracted Stripe as its own line. Under Model C the fee is EMBEDDED in the all-in price and Stripe is paid OUT OF that fee, so the old math both missed the fee entirely and would have double-counted Stripe once the fee was derived. Rewritten: gross (all-in) - derived service fee = FACE VALUE = NBOR = the artist split base (confirmed by Joe, Jul 13 2026). Stripe/OCTL/venue shares are non-deducting memo lines under the fee. The venue's fee share flows to Additional Revenue (venue keeps 100%, never in the artist split), and is computed as the REMAINDER (svc - stripe - octl) rather than summing venueNet, because calcOCTLFees() rounds each output field independently and its components can overshoot the fee gross by a penny. Tax and refunds now apply to face value, not the all-in gross. Net effect on the WSHE event (10 x $100): split point drops from $969.80 to $921.70. Prior v2.8:  CROSS-VENUE DATA LEAK FIXED: Payouts and Royalty Revenue queried the shared `payouts` table (no venue_id column exists on it — confirmed via insert code) with NO filter at all, so every venue on the shared Supabase project saw every other venue's resale listings and royalty figures. Both now scope to `.in("event_id", <this venue's own event ids>)` before querying. SAME BUG STILL PRESENT in Customers (tickets query) and Exceptions (exception_requests query) — flagged to Joe, not yet fixed pending his go-ahead (Customers leak includes cross-venue buyer PII). Prior v2.7 — MODEL C CLIFF FIX (Joe-approved Jul 12 2026): the documented formula applied the 8.5% rate to the WHOLE price the instant it crossed $50, crashing venue net from $0.66 (at $50.00) to $0.22 (at $51.00). Fix: for the $50–$65 band, VENUE NET and OCTL TAKE are frozen at their exact $50 anchor values — per payment method (card: venue $0.66 / OCTL $2.14; crypto: venue $2.41 / OCTL $2.14 — crypto's anchor differs because no Stripe fee shrinks its pool). Stripe fee still scales with real price; service fee gross grows just enough to cover (frozen venue + frozen OCTL + actual Stripe fee); artist face value absorbs the remainder. ≤$50 and >$65 unchanged. Venue net is perfectly flat across the band with zero discontinuity at $65→$66; OCTL steps $2.14→$2.29 at $66 by design (Joe: leave as-is). Prior v2.6: Model C all-in pricing UI + embedded calcOCTLFees(). -->
 <style>
   @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap');
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -202,7 +258,7 @@
       <div class="topbar-title">Door Entry</div>
     </div>
     <div class="topbar-right" style="display:flex;align-items:center;gap:10px">
-      <span class="version-pill">v2.4</span>
+      <span class="version-pill">v2.16</span>
       <button class="btn btn-ghost btn-sm" onclick="exitDoorScreen()">Exit</button>
     </div>
   </div>
@@ -223,7 +279,7 @@
       <div class="topbar-title">Venue Management</div>
     </div>
     <div class="topbar-right">
-      <span class="version-pill">v2.4</span>
+      <span class="version-pill">v2.16</span>
       <div class="topbar-divider"></div>
       <div class="db-status"><div class="db-dot" id="db-dot"></div><span id="db-status-text">Connecting…</span></div>
       <div class="topbar-divider"></div>
@@ -344,9 +400,12 @@
           <div class="card-title-lg">Show P&amp;L</div>
           <div class="form-hint">Revenue pulled from ticket sales · expenses entered below, saved per show</div>
         </div>
-        <select class="form-input" id="sf-event-select" style="margin-bottom:0;width:auto" onchange="renderShowFinancials()">
-          <option value="">Select an event…</option>
-        </select>
+        <div style="display:flex;gap:8px;align-items:center">
+          <select class="form-input" id="sf-event-select" style="margin-bottom:0;width:auto" onchange="renderShowFinancials()">
+            <option value="">Select an event…</option>
+          </select>
+          <button class="btn btn-danger btn-sm" id="sf-cancel-event-btn" onclick="cancelEvent()" title="Permanently remove this event's listing. Sold tickets are NOT affected.">✗ Cancel Event</button>
+        </div>
       </div>
       <div id="sf-event-list"></div>
       <div class="form-hint" style="margin-top:1rem">Aggregate financial figures only — no buyer names or emails appear on this tab.</div>
@@ -401,6 +460,7 @@
           <div class="form-group">
             <label class="form-label">Capacity (max entrants)</label>
             <input class="form-input" type="number" id="ae-capacity" placeholder="750">
+            <div class="form-hint">Leave blank to sell the full room. Cannot exceed the venue's legal capacity.</div>
           </div>
           <div class="form-group span2">
             <label class="form-label">Description</label>
@@ -432,14 +492,17 @@
           </div>
         </div>
 
-        <div class="form-group" style="margin-top:.75rem;max-width:220px">
-          <label class="form-label">GA Price ($)</label>
-          <input class="form-input" type="number" id="ae-price" placeholder="25.00">
+        <div class="card" style="margin-top:.75rem">
+          <div style="font-size:10px;font-weight:700;color:var(--gold);text-transform:uppercase;letter-spacing:.8px;font-family:var(--fm);margin-bottom:.35rem">Model C — All-In Pricing</div>
+          <div class="form-hint" style="margin-bottom:.65rem">Enter the single price the fan pays — nothing is added at checkout. Face value (what the artist settles on) and the service fee are derived automatically from this number.</div>
+          <div class="form-group" style="max-width:220px;margin-bottom:.65rem">
+            <label class="form-label">All-In Ticket Price ($) *</label>
+            <input class="form-input" type="number" id="ae-price" placeholder="35.00" min="1" step="0.01" oninput="aeUpdateFeeBreakdown()">
+          </div>
+          <div id="ae-modelc-breakdown" style="background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:.75rem;font-family:var(--fm);font-size:11px;color:var(--txt2)">
+            Enter a price to see the fee breakdown.
+          </div>
         </div>
-        <!-- Service Fee field intentionally removed — pending Model C all-in
-             pricing (% of ticket price). Exact percentage not yet set; this
-             stays hidden at 0 until that number is confirmed. -->
-        <input type="hidden" id="ae-fee" value="0">
 
         <div style="margin-top:1rem">
           <div class="form-label" style="margin-bottom:.35rem">Tickets On Sale</div>
@@ -550,7 +613,7 @@
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script>
 // ════════════════════════════════════════════════════════════════════════
-// chaotic_admin v2.4 — Club Chaotic Venue Admin
+// chaotic_admin v2.9 — Club Chaotic Venue Admin (cross-venue payouts/royalty leak fixed)
 // Same shared OCTL project as the public venue file. Real Supabase Auth
 // replaces the old client-side PIN for everything except the Door Scanner
 // (see note above the door panel for why that one's different).
@@ -560,6 +623,15 @@ const SUPABASE_URL = 'https://uruepqyiupmmvwmvjrie.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_3K3JxO9uhq7zUvY0C29tRQ_MBBbTNcd';
 const VERCEL_API    = 'https://octickets-api.vercel.app';
 const VENUE_ID       = 'concerttix';
+// v2.16: fixed at the venue's actual legal/fire-code capacity — the room's
+// physical limit, not a per-show decision. Deliberately NOT editable from
+// the Add Event wizard (same category of fact as the venue's name or
+// address): a promoter can sell FEWER tickets than this for an exclusive
+// night, never more. Matches the customer-facing file's own GA_CAPACITY.
+// If this file is ever cloned as a template for a different GA venue, this
+// is the one number that needs to change for that new room — a one-time
+// venue-setup edit, not something touched per event.
+const VENUE_LEGAL_CAPACITY = 750;
 let DOOR_PIN        = 'CHANGE-ME'; // set this before handing to door staff
 
 const db = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
@@ -740,12 +812,156 @@ function aeGoStep(n){
   if(n===2) aePopulateSummary();
 }
 
+// ── MODEL C FEE MATH (v2.7 — frozen $50–$65 band) ──────────────────────────
+// Single source of truth for the fee split. Base formula verified against the
+// business doc's Section 3.3 table (46/48 exact; 2 one-penny rounding artifacts
+// in the source doc). v2.7 adds the Joe-approved cliff fix: inside the
+// $50–$65 band, venue net + OCTL take are frozen at their $50 anchor values
+// (per payment method) — see header comment. Rounding: every intermediate
+// carried at full precision; each output field rounded to cents independently.
+// ══════════════════════════════════════════════════════════════════════════════
+// MODEL C FEE ENGINE — v3 (CANONICAL)
+// ══════════════════════════════════════════════════════════════════════════════
+// BYTE-IDENTICAL to lib/calcOCTLFees.js on the server, except for the two lines
+// marked BROWSER below. Do NOT edit this block in one file only — it is the same
+// block in club_chaotic, coral_springs, chaotic_admin, casino_admin and
+// artscenter_admin, and the server charges money with it. If it changes, change
+// lib/calcOCTLFees.js first, run `node lib/calcOCTLFees.test.js` (must print
+// "ALL INVARIANTS HOLD - 0 failures"), then re-propagate to every file.
+//
+// v3 fixes three defects present in the v2 copy this replaces:
+//   1. ROUNDING: v2 rounded all six outputs independently, so stripe+octl+venue
+//      did NOT sum to serviceFeeGross in ~1/3 of prices. v3 rounds the independent
+//      quantities and derives the dependents as remainders, so these hold exactly:
+//          faceValue + serviceFeeGross === allInPrice
+//          stripeFee + octlTake + venueNet === serviceFeeGross
+//          octlTake + venueNet === netPool
+//   2. OCTL CAP: v2 capped OCTL's take against the RAW pool then rounded, which
+//      could push it a cent above the ROUNDED pool and drag venueNet to -$0.01
+//      (it did, at $25 and 350 other prices). v3 caps after rounding.
+//   3. INTERFACE: v2 threw / returned null / had no guard depending on the copy.
+//      v3 never throws — bad input returns an all-zero split. paymentMethod is
+//      NORMALIZED by regex, so the "Crypto Wallet" string the tickets table
+//      actually stores is finally recognised as crypto (v2 treated it as CARD and
+//      charged it a Stripe fee it never paid).
+//
+// FAN-FACING RULE: only faceValue and serviceFeeGross may ever be shown to a
+// buyer. stripeFee / octlTake / venueNet are internal — never itemize them on any
+// buyer-facing surface (all-in pricing compliance).
+//
+// venueNet goes NEGATIVE below ~$4.93 on card, deliberately: there the service fee
+// cannot even cover Stripe's own fee, and the venue absorbs it (Joe, Jul 13 2026:
+// "that is on the venue, not OCTL"). Do not floor it — the negative is what makes
+// face + venueNet equal what Stripe actually transfers. Clamp at the DISPLAY layer
+// if a venue-facing panel must not show a negative.
+// ──────────────────────────────────────────────────────────────────────────────
+
+function round2(n) {
+  return Math.round((n + Number.EPSILON) * 100) / 100;
+}
+
+const FROZEN_ANCHORS = {
+  card:   { venue: 0.66, octl: 2.14 },
+  crypto: { venue: 2.41, octl: 2.14 },  // crypto's anchor differs: no Stripe fee shrinks its pool
+};
+
+const ZERO_SPLIT = {
+  allInPrice: 0, allIn: 0, faceValue: 0, serviceFeeGross: 0, stripeFee: 0,
+  netPool: 0, octlTake: 0, venueNet: 0, paymentMethod: 'card',
+};
+
+function calcOCTLFees(allInPrice, paymentMethod = 'card') {
+  const method = /crypto|wallet/i.test(String(paymentMethod)) ? 'crypto' : 'card';
+
+  const allIn = Number(allInPrice);
+  if (!Number.isFinite(allIn) || allIn <= 0) {
+    return Object.assign({}, ZERO_SPLIT, { paymentMethod: method });
+  }
+
+  const stripeRaw = (method === 'crypto') ? 0 : (allIn * 0.029 + 0.30);
+
+  let svcRaw, octlRaw;
+  if (allIn > 50 && allIn <= 65) {
+    // FROZEN BAND (cliff fix, Joe-approved Jul 12 2026). The documented formula
+    // applied 8.5% to the WHOLE price the instant it crossed $50, crashing venue
+    // net from $0.66 (at $50.00) to $0.22 (at $51.00). Fix: venue net and OCTL take
+    // are pinned at their $50 anchor values FOR THIS PAYMENT METHOD. Stripe still
+    // scales with the real price; the service fee stretches to cover; face value
+    // absorbs the rest. OCTL steps $2.14 -> $2.29 at $66 by design.
+    const a = FROZEN_ANCHORS[method];
+    svcRaw  = a.venue + a.octl + stripeRaw;
+    octlRaw = a.octl;
+  } else {
+    const rate = allIn <= 50 ? 0.10 : 0.085;
+    svcRaw     = allIn - allIn / (1 + rate);
+    const netRaw = svcRaw - stripeRaw;
+    // OCTL takes $1 + 25% of the fee, capped at the pool and floored at $0. The cap
+    // is what makes OCTL — never the venue — absorb the thin fee on cheap tickets:
+    // venue net is $0.00 on every card ticket under ~$33.18, by design.
+    octlRaw = Math.max(0, Math.min(1.00 + 0.25 * svcRaw, netRaw));
+  }
+
+  // Round the independents; derive the dependents as remainders.
+  const serviceFeeGross = round2(svcRaw);
+  const faceValue       = round2(allIn - serviceFeeGross);
+  const stripeFee       = round2(stripeRaw);
+  const netPool         = round2(serviceFeeGross - stripeFee);
+  const octlTake        = Math.min(round2(octlRaw), Math.max(netPool, 0));
+  const venueNet        = round2(netPool - octlTake);
+
+  return {
+    allInPrice: round2(allIn),
+    allIn:      round2(allIn),   // BROWSER: alias — venue files read .allIn, admin files read .allInPrice
+    faceValue,
+    serviceFeeGross,
+    stripeFee,
+    netPool,
+    octlTake,
+    venueNet,
+    paymentMethod: method,
+  };
+}
+// BROWSER: no module.exports here — the server copy at lib/calcOCTLFees.js has it.
+
+// Live breakdown panel under the All-In price input — venue-operator view,
+// so it shows the full split (fan-facing checkout will show face + fee only).
+function aeUpdateFeeBreakdown(){
+  const el = document.getElementById('ae-modelc-breakdown');
+  if(!el) return;
+  const allIn = parseFloat(document.getElementById('ae-price')?.value);
+  const card = calcOCTLFees(allIn, 'card');
+  if(!card){ el.innerHTML = 'Enter a price to see the fee breakdown.'; return; }
+  const crypto = calcOCTLFees(allIn, 'crypto');
+  const capNote = card.venueNet === 0
+    ? `<div style="margin-top:.5rem;color:var(--amberd)">⚠ At this price the card-payment pool cap applies — venue service-fee share is $0.00 on card sales (fan and artist are unaffected).</div>`
+    : '';
+  el.innerHTML = `
+    <div style="display:grid;grid-template-columns:auto auto;gap:2px 16px;max-width:420px">
+      <span>Fan pays (all-in)</span><span style="color:var(--txt);text-align:right">$${card.allInPrice.toFixed(2)}</span>
+      <span>Face value (artist settles)</span><span style="color:var(--gold);text-align:right">$${card.faceValue.toFixed(2)}</span>
+      <span>Service fee (embedded)</span><span style="text-align:right">$${card.serviceFeeGross.toFixed(2)}</span>
+      <span style="margin-top:.4rem;color:var(--txt3)">Card — venue net / OCTL</span><span style="margin-top:.4rem;text-align:right;color:var(--okd)">$${card.venueNet.toFixed(2)} / <span style="color:var(--txt2)">$${card.octlTake.toFixed(2)}</span></span>
+      <span style="color:var(--txt3)">Crypto — venue net / OCTL</span><span style="text-align:right;color:var(--okd)">$${crypto.venueNet.toFixed(2)} / <span style="color:var(--txt2)">$${crypto.octlTake.toFixed(2)}</span></span>
+    </div>${capNote}`;
+}
+
 function validateAE(){
   const msgs = [];
   if(!document.getElementById('ae-name').value.trim()) msgs.push('Event name required.');
   if(!document.getElementById('ae-date').value) msgs.push('Date required.');
   const price = parseFloat(document.getElementById('ae-price').value);
-  if(!price || price<=0) msgs.push('Ticket price required.');
+  if(!price || price<=0) msgs.push('All-in ticket price required.');
+  // v2.16: legal-capacity ceiling. A blank field is fine (defaults to the
+  // full room — unchanged); an entered number above the venue's actual
+  // legal/fire-code capacity is rejected outright rather than silently
+  // clamped, so a promoter sees clearly why, instead of having their input
+  // quietly rewritten.
+  const capacityRaw = document.getElementById('ae-capacity').value;
+  if(capacityRaw !== ''){
+    const capacity = parseInt(capacityRaw);
+    if(!Number.isInteger(capacity) || capacity <= 0) msgs.push('Capacity must be a positive number.');
+    else if(capacity > VENUE_LEGAL_CAPACITY) msgs.push(`Capacity cannot exceed the venue's legal capacity of ${VENUE_LEGAL_CAPACITY}.`);
+  }
   return msgs;
 }
 
@@ -764,7 +980,9 @@ function aeBuildMeta(){
   const saleDate = document.getElementById('ae-sale-date').value;
   const saleTime = document.getElementById('ae-sale-time').value;
   return {
-    id: name.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'') + '-' + date,
+    // v2.5: 4-char random suffix — slug+date alone collided (insert error) if the
+    // same event name + date was ever created twice (e.g. a re-created event).
+    id: name.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'') + '-' + date + '-' + Math.random().toString(36).slice(2,6),
     name, date,
     doors_open: document.getElementById('ae-doors').value || null,
     show_time:  document.getElementById('ae-show').value || null,
@@ -772,10 +990,24 @@ function aeBuildMeta(){
     royalty_percent: parseFloat(document.getElementById('ae-royalty').value) || 10,
     description: document.getElementById('ae-desc').value.trim() || null,
     genres: (document.getElementById('ae-tags').value || '').split(',').map(t=>t.trim()).filter(Boolean).join(','),
+    // MODEL C (v2.6): tier1_price stores the ALL-IN price — the single number
+    // the fan pays. The venue file charges tier1_price directly, so fan totals
+    // are correct with no venue-file change. tier1_fee is deliberately 0:
+    // face value / service fee / splits are DERIVED via calcOCTLFees(), never
+    // stored (compute fresh, never trust a stored derived value).
     tier1_price: parseFloat(document.getElementById('ae-price').value) || null,
-    tier1_fee:   parseFloat(document.getElementById('ae-fee').value) || 0,
+    tier1_fee:   0,
     max_entrants: parseInt(document.getElementById('ae-capacity').value) || null,
-    sale_start: saleDate ? (saleDate + 'T' + (saleTime||'00:00') + ':00') : null,
+    // v2.14 FIX: was sending a naive datetime string ("2026-08-19T04:00:00")
+    // straight to the DB with no timezone conversion — Supabase stored it
+    // as if the entered time were already UTC, not local. Same bug found
+    // and fixed in artscenter_admin v1.4 and casino_admin v1.4. This file
+    // has no local .toISOString()-converted field to point to as a
+    // reference (no event_config doors_open conversion here, unlike the
+    // other two) — same fix applies regardless: build a Date from the
+    // local input (JS treats a no-offset string as local time), then
+    // serialize to real UTC.
+    sale_start: saleDate ? new Date(saleDate + 'T' + (saleTime||'00:00') + ':00').toISOString() : null,
     transfer_enabled: document.getElementById('ae-transfer-enabled').value !== 'false',
     resale_rule: document.getElementById('ae-resale-rule').value || 'open',
   };
@@ -790,8 +1022,11 @@ function aePopulateSummary(){
     <div class="t-row"><span class="t-label">Event</span><span class="t-val">${m.name}</span></div>
     <div class="t-row"><span class="t-label">Date</span><span class="t-val">${m.date} · Doors ${m.doors_open||'—'} · Show ${m.show_time||'—'}</span></div>
     <div class="t-row"><span class="t-label">Age</span><span class="t-val">${m.age_restriction}</span></div>
-    <div class="t-row"><span class="t-label">Ticket Price</span><span class="t-val" style="color:var(--gold)">$${m.tier1_price} · General Admission</span></div>
-    <div class="t-row"><span class="t-label">Capacity</span><span class="t-val">${m.max_entrants ?? '—'} tickets</span></div>
+    <div class="t-row"><span class="t-label">All-In Price (fan pays)</span><span class="t-val" style="color:var(--gold)">$${m.tier1_price} · General Admission</span></div>
+    <div class="t-row"><span class="t-label">Face Value (artist)</span><span class="t-val">$${(calcOCTLFees(m.tier1_price,'card')?.faceValue ?? 0).toFixed(2)}</span></div>
+    <div class="t-row"><span class="t-label">Service Fee (embedded)</span><span class="t-val">$${(calcOCTLFees(m.tier1_price,'card')?.serviceFeeGross ?? 0).toFixed(2)}</span></div>
+    <div class="t-row"><span class="t-label">Venue Net (card / crypto)</span><span class="t-val" style="color:var(--okd)">$${(calcOCTLFees(m.tier1_price,'card')?.venueNet ?? 0).toFixed(2)} / $${(calcOCTLFees(m.tier1_price,'crypto')?.venueNet ?? 0).toFixed(2)}</span></div>
+    <div class="t-row"><span class="t-label">Capacity</span><span class="t-val">${m.max_entrants ?? `Full room (${VENUE_LEGAL_CAPACITY})`} tickets</span></div>
     <div class="t-row"><span class="t-label">Royalty on Resale</span><span class="t-val">${m.royalty_percent}%</span></div>
     <div class="t-row"><span class="t-label">On Sale</span><span class="t-val">${m.sale_start ? m.sale_start.replace('T',' ') : 'Immediately'}</span></div>
     <div style="border-top:1px solid var(--border);margin:.5rem 0"></div>
@@ -961,7 +1196,16 @@ async function venueResendTickets(){
 // ── PAYOUTS ─────────────────────────────────────────────────────────────
 async function loadPayouts(){
   const el = document.getElementById('payouts-list');
-  const { data, error } = await db.from('payouts').select('*').order('created_at',{ascending:false});
+  // v2.8: payouts is a SHARED table across all venues (no venue_id column —
+  // confirmed via the venue file's insert, which never writes one). Every
+  // venue's resale listings were landing in every other venue's admin.
+  // Scope to this venue's own events instead.
+  if(!EVENTS.length){ const { data: evData } = await db.from('events').select('*').eq('venue_id', VENUE_ID); EVENTS = evData || []; }
+  const eventIds = EVENTS.map(e => e.id);
+  const { data, error } = await db.from('payouts')
+    .select('*')
+    .in('event_id', eventIds.length ? eventIds : ['__none__']) // impossible id → empty result, never an unfiltered IN clause
+    .order('created_at',{ascending:false});
   if(error){ el.innerHTML = `<div class="err-msg">${error.message}</div>`; return; }
   _allPayouts = data || [];
   filterPayouts(_payoutFilter);
@@ -994,7 +1238,19 @@ async function markPayoutPaid(id){
 // ── EXCEPTION REQUESTS ─────────────────────────────────────────────────
 async function loadExceptionRequests(){
   const el = document.getElementById('exceptions-list');
-  const { data, error } = await db.from('exception_requests').select('*').in('status',['pending','approved','denied']).order('id',{ascending:false});
+  // FIX: same cross-venue leak already found and fixed in loadPayouts() at
+  // v2.8, flagged here since then as "not yet fixed pending Joe's
+  // go-ahead" — no venue filter at all, so every venue's exception
+  // requests (transfer-restriction override requests, including
+  // requestor/recipient phone numbers) showed up in every venue's admin.
+  // Same scoping pattern as loadPayouts/loadCustomerData: this venue's
+  // own event ids only.
+  if(!EVENTS.length){ const { data: evData } = await db.from('events').select('*').eq('venue_id', VENUE_ID); EVENTS = evData || []; }
+  const eventIds = EVENTS.map(e => e.id);
+  const { data, error } = await db.from('exception_requests')
+    .select('*')
+    .in('event_id', eventIds.length ? eventIds : ['__none__']) // impossible id → empty result, never an unfiltered IN clause
+    .in('status',['pending','approved','denied']).order('id',{ascending:false});
   if(error){ el.innerHTML = `<div class="err-msg">${error.message}</div>`; return; }
   if(!data || !data.length){ el.innerHTML = '<div class="empty">No exception requests on record.</div>'; return; }
 
@@ -1189,10 +1445,15 @@ async function renderFanGraph(selectEventId){
 
 // ── ROYALTY REVENUE — per-event royalty %, now a real column instead of a flat hardcoded rate ──
 async function loadRoyalties(){
-  const { data, error } = await db.from('payouts').select('listed_price,event_id,event_name,seat,payout_status').order('created_at',{ascending:false});
+  // v2.8: same shared-table leak as loadPayouts() — scope to this venue's events.
+  if(!EVENTS.length){ const { data: evData } = await db.from('events').select('*').eq('venue_id', VENUE_ID); EVENTS = evData || []; }
+  const eventIds = EVENTS.map(e => e.id);
+  const { data, error } = await db.from('payouts')
+    .select('listed_price,event_id,event_name,seat,payout_status')
+    .in('event_id', eventIds.length ? eventIds : ['__none__'])
+    .order('created_at',{ascending:false});
   if(error){ document.getElementById('royalty-list').innerHTML = `<div class="err-msg">${error.message}</div>`; return; }
   const rows = data || [];
-  if(!EVENTS.length){ const { data: evData } = await db.from('events').select('*').eq('venue_id', VENUE_ID); EVENTS = evData || []; }
   const royaltyPct = eventId => (EVENTS.find(e => e.id === eventId)?.royalty_percent ?? 10) / 100;
 
   const volume = rows.reduce((s,r) => s + (r.listed_price || 0), 0);
@@ -1217,8 +1478,19 @@ async function loadCustomerData(){
   if(evFilter && evFilter.options.length <= 1){
     EVENTS.forEach(ev => { const o = document.createElement('option'); o.value = ev.id; o.textContent = ev.name; evFilter.appendChild(o); });
   }
+  // FIX: same cross-venue leak already found and fixed in loadPayouts() at
+  // v2.8 — tickets has no venue_id column, so this query returned every
+  // venue's tickets, and the buyer lookup below pulled full PII (phone,
+  // zip, age range, referral source, opt-ins) for any buyer who'd ever
+  // purchased from ANY venue on the shared project, not just this one.
+  // This was the more serious half of the two leaks flagged since v2.8 —
+  // logged then as "not yet fixed pending Joe's go-ahead," now fixed.
+  // Same scoping pattern: this venue's own event ids only.
+  if(!EVENTS.length){ const { data: evData } = await db.from('events').select('*').eq('venue_id', VENUE_ID); EVENTS = evData || []; }
+  const eventIds = EVENTS.map(e => e.id);
   const { data: tickets, error } = await db.from('tickets')
     .select('buyer_email,buyer_name,event_id,event_name,seat,payment,purchased_at,status')
+    .in('event_id', eventIds.length ? eventIds : ['__none__']) // impossible id → empty result, never an unfiltered IN clause
     .neq('status','held').neq('status','refunded').order('purchased_at',{ascending:false});
   if(error){ document.getElementById('cust-tbody').innerHTML = `<tr><td colspan="15" class="err-msg">${error.message}</td></tr>`; return; }
 
@@ -1328,6 +1600,9 @@ function exportCustomersCSV(){
 // Split-point formula (locked, Option B): promoter profit % applies to
 // expenses + guarantee combined, not expenses alone.
 const SF_STRIPE_RATE = 0.029, SF_STRIPE_FIXED = 0.30;
+// Model C P&L: round to cents at every aggregation boundary so displayed lines
+// always reconcile exactly (face + service fee === all-in gross, to the penny).
+const _r2 = x => Math.round(x * 100) / 100;
 let _sfData = {};
 let _sfTickets = {}; // eventId -> raw ticket rows, cached per session
 
@@ -1347,6 +1622,95 @@ async function loadShowFinancials(){
     });
   }
   await renderShowFinancials();
+}
+
+// v2.5: rebuild the Shows selector from the current EVENTS array (used after a
+// cancellation — the loadShowFinancials() populate only runs when the list is empty).
+function sfRepopulateSelect(){
+  const sel = document.getElementById('sf-event-select');
+  if(!sel) return;
+  sel.innerHTML = '<option value="">Select an event…</option>';
+  [...EVENTS].sort((a,b) => (b.date||'').localeCompare(a.date||'')).forEach(ev => {
+    const o = document.createElement('option');
+    o.value = ev.id; o.textContent = ev.name + (ev.date ? ' · '+ev.date : '');
+    sel.appendChild(o);
+  });
+}
+
+// ── v2.5: CANCEL EVENT ───────────────────────────────────────────────────
+// Permanently removes an event's LISTING: deletes the events row, its
+// event_config row, and its event_financials row. Sold tickets are NOT
+// touched — tickets don't depend on the events row (they carry their own
+// event_name/event_id), so existing valid tickets keep working at the door.
+// No refunds are issued by this action.
+async function cancelEvent(){
+  const sel = document.getElementById('sf-event-select');
+  const eventId = sel?.value;
+  if(!eventId){ alert('Select an event first, then Cancel Event.'); return; }
+  const ev = EVENTS.find(e => e.id === eventId);
+  const evLabel = ev ? (ev.name + (ev.date ? ' · ' + ev.date : '')) : eventId;
+
+  const btn = document.getElementById('sf-cancel-event-btn');
+  if(btn){ btn.disabled = true; btn.textContent = 'Checking…'; }
+
+  // Count tickets attached to this event so the confirmation is informed
+  let ticketCount = 0;
+  try {
+    const { count, error } = await db.from('tickets')
+      .select('id', { count: 'exact', head: true })
+      .eq('event_id', eventId);
+    if(!error && typeof count === 'number') ticketCount = count;
+  } catch(e){ /* count is advisory only */ }
+
+  if(btn){ btn.disabled = false; btn.textContent = '✗ Cancel Event'; }
+
+  const warn =
+    'CANCEL EVENT — permanent.\n\n' +
+    'Event: ' + evLabel + '\n' +
+    'Tickets on record: ' + ticketCount + '\n\n' +
+    'This removes the event listing (events, event_config, and P&L expense rows) from Supabase.\n' +
+    '• Sold tickets are NOT affected — they remain valid and still scan at the door.\n' +
+    '• No refunds are issued by this action.\n' +
+    '• This cannot be undone.\n\n' +
+    'Continue?';
+  if(!confirm(warn)) return;
+
+  // Second gate when real tickets exist: type the event name to confirm
+  if(ticketCount > 0){
+    const typed = prompt('This event has ' + ticketCount + ' ticket(s) on record.\nType the event name exactly to confirm cancellation:\n\n' + (ev?.name || eventId));
+    if(typed === null) return;
+    if(typed.trim() !== (ev?.name || '').trim()){
+      alert('Name did not match — cancellation aborted. Nothing was deleted.');
+      return;
+    }
+  }
+
+  if(btn){ btn.disabled = true; btn.textContent = 'Cancelling…'; }
+  try {
+    // Delete children first, then the event row. Each result is checked —
+    // a failure stops the sequence so we never leave a half-deleted state silently.
+    const { error: cfgErr } = await db.from('event_config').delete().eq('event_id', eventId);
+    if(cfgErr) throw new Error('event_config delete failed: ' + cfgErr.message);
+    const { error: finErr } = await db.from('event_financials').delete().eq('event_id', eventId);
+    if(finErr) throw new Error('event_financials delete failed: ' + finErr.message);
+    const { error: evErr } = await db.from('events').delete().eq('id', eventId);
+    if(evErr) throw new Error('events delete failed: ' + evErr.message);
+
+    // Refresh local state + UI
+    EVENTS = EVENTS.filter(e => e.id !== eventId);
+    delete _sfData[eventId];
+    delete _sfTickets[eventId];
+    sfRepopulateSelect();
+    await renderShowFinancials();
+    try { await loadOverview(); } catch(e){}
+    alert('✓ Event cancelled: ' + evLabel + '\n\nListing removed. Existing tickets (if any) remain valid.');
+    console.log('✓ Event cancelled:', eventId);
+  } catch(e){
+    alert('Cancel Event failed: ' + e.message + '\n\nNothing further was deleted — check Supabase before retrying.');
+    console.error('cancelEvent error:', e);
+  } finally {
+    if(btn){ btn.disabled = false; btn.textContent = '✗ Cancel Event'; }
+  }
 }
 
 function sfGet(eventId, field, fallback=0){
@@ -1380,21 +1744,63 @@ async function sfCalc(eventId){
   const refunded  = all.filter(t => t.status === 'refunded');
   const admitted  = all.filter(t => t.status === 'scanned');
 
-  // Box office → NBOR (off-the-top deductions only, before any expense is touched)
-  // feesCollected derived from the event's real tier1_fee column (a flat
-  // per-ticket service fee set at event creation), since there's no actual
-  // per-ticket fee column to sum.
-  const evForFee        = EVENTS.find(e => e.id === eventId);
-  const feesCollected  = paid.length * (evForFee?.tier1_fee || 0);
-  const grossTicket    = paid.reduce((s,t)=>s+(t.price||0),0);
+  // ══ Box office → NBOR — MODEL C (v2.9) ══════════════════════════════════
+  // Under Model C the stored ticket `price` IS the ALL-IN amount the fan paid, and
+  // the tickets table stores fee = 0. Two consequences the old math got wrong:
+  //
+  //   1. "Service fees collected" read $0.00 (it summed tier1_fee, now 0). The
+  //      service fee is no longer a separate collected amount — it is EMBEDDED in
+  //      the all-in price and must be DERIVED backward via calcOCTLFees().
+  //   2. Stripe was subtracted as its own line. Under Model C, Stripe comes OUT OF
+  //      the service-fee gross (netPool = svcGross − stripe). Deducting a derived
+  //      service fee AND a separate Stripe line would DOUBLE-COUNT Stripe.
+  //
+  // SPLIT BASE (confirmed by Joe, Jul 13 2026): the artist splits on FACE VALUE.
+  // NBOR = face-value receipts. The venue's share of the service fee is venue-
+  // retained revenue — it flows to Additional Revenue alongside F&B/merch and
+  // NEVER enters NBOR or the artist split. Stripe's and OCTL's shares leave the
+  // building entirely and are memo lines only.
+  const method = t => /crypto|wallet/i.test(t.payment || '') ? 'crypto' : 'card';
+  // v3 engine: calcOCTLFees() never throws and never returns null — a non-positive
+  // price yields an all-zero split. The local ZERO_SPLIT fallback the v2 engine
+  // required has been removed (it also collided with the engine's own ZERO_SPLIT).
+  const feesFor = t => calcOCTLFees(t.price||0, method(t));
+
+  const grossTicket   = paid.reduce((s,t)=>s+(t.price||0),0);          // all-in receipts
+  const _paidFees     = paid.map(feesFor);
+  const svcFeeDerived = _r2(_paidFees.reduce((s,f)=>s+f.serviceFeeGross,0)); // embedded, not additive
+  const faceValue     = _r2(grossTicket - svcFeeDerived);              // artist split base
+  const stripeActual  = _r2(_paidFees.reduce((s,f)=>s+f.stripeFee,0)); // MEMO — inside the fee
+  const octlTake      = _r2(_paidFees.reduce((s,f)=>s+f.octlTake,0));  // MEMO — inside the fee
+  // Venue's share of the service fee. Under the v2 engine this HAD to be computed as
+  // a remainder, because independent rounding meant summing venueNet overshot the fee
+  // gross by a penny. The v3 engine reconciles exactly (stripe + octl + venue ===
+  // serviceFeeGross at every price), so summing venueNet is now correct and is what
+  // settlement actually pays. Kept as the remainder anyway: it is identical under v3
+  // and stays self-reconciling if the memo lines are ever re-derived.
+  const venueFeeShare = _r2(svcFeeDerived - stripeActual - octlTake);   // OCTL<->venue rebate; NOT show revenue
+
+  // PRESENTATION ONLY (v2.11): the fee memo shown on the P&L folds the venue's slice
+  // into the OCTL line, so an artist reading the settlement sees Stripe + OCTL and no
+  // venue cut. Purely a display roll-up — venueFeeShare is still tracked separately
+  // and still credited to Additional Revenue. By construction:
+  //     stripeActual + octlShown === svcFeeDerived   (exactly, to the penny)
+  const octlShown = _r2(octlTake + venueFeeShare);
+
+  // Tax and refunds now apply to FACE VALUE, not the all-in gross — the service fee
+  // was never the venue's box-office receipts, so it is not a taxable ticket receipt
+  // and a refunded ticket only pulls its face portion out of NBOR.
   const taxRate        = sfGet(eventId,'tax_rate',0)/100;
-  const taxAmt         = grossTicket * taxRate;
+  const taxAmt         = _r2(faceValue * taxRate);
   const facilityPerTix = sfGet(eventId,'facility_fee_per_ticket',0);
   const facilityFees   = paid.length * facilityPerTix;
-  const stripeSessions = new Set(paid.filter(t=>t.payment==='Card').map(t=>t.tx_hash).filter(Boolean));
-  const stripeEst       = (grossTicket+feesCollected)*SF_STRIPE_RATE + stripeSessions.size*SF_STRIPE_FIXED;
-  const refundAmt       = refunded.reduce((s,t)=>s+(t.price||0),0); // fee not tracked per-ticket — see note above
-  const NBOR = grossTicket + feesCollected - taxAmt - facilityFees - stripeEst - refundAmt;
+  const refundAmt      = _r2(refunded.reduce((s,t)=>s+feesFor(t).faceValue,0));
+
+  const NBOR = _r2(faceValue - taxAmt - facilityFees - refundAmt);
+
+  // Retained for the export/back-compat surface; no longer deducted anywhere.
+  const feesCollected = svcFeeDerived;
+  const stripeEst     = stripeActual;
 
   // Expenses — capped per line; guarantee has no cap, it's the contractual floor
   const artistFee       = sfCapped(eventId,'artist_fee');
@@ -1423,7 +1829,17 @@ async function sfCalc(eventId){
   const fbRev    = sfGet(eventId,'fb_revenue',0);
   const merchRev = sfGet(eventId,'merch_revenue',0);
   const otherRev = sfGet(eventId,'other_revenue',0);
-  const totalAddlRev = fbRev+merchRev+otherRev;
+  // v2.12 — venueFeeShare is NOT show revenue and is NOT in this total.
+  // Model (Joe, Jul 13 2026): the service fee goes 100% to OCTL. OCTL then rebates
+  // part of it back to the venue for using the platform. That rebate is a commercial
+  // arrangement BETWEEN OCTL AND THE VENUE — it is not a cost or a revenue of the
+  // show, so it has no place in a show P&L an artist or outside promoter settles
+  // against. It is therefore excluded from Additional Revenue, from Total Revenue,
+  // from Net Profit, and from the export. (F&B / merch / other DO stay: those can
+  // genuinely be in scope of an outside-promoter agreement, which is exactly why
+  // they are itemized here.) venueFeeShare remains computed and on the returned
+  // object for OCTL-side reconciliation only — it is never rendered.
+  const totalAddlRev = _r2(fbRev+merchRev+otherRev);
 
   // Outside co-promoter split — a DIFFERENT split than the artist deal above.
   // This is the venue optionally sharing its own net with another promoter.
@@ -1444,6 +1860,7 @@ async function sfCalc(eventId){
   return {
     paidCount: paid.length, compCount: comps.length, refundCount: refunded.length, admittedCount: admitted.length,
     grossTicket, feesCollected, taxAmt, facilityFees, stripeEst, refundAmt, NBOR,
+    svcFeeDerived, faceValue, stripeActual, octlTake, venueFeeShare, octlShown,
     artistFee, venueRental, production, marketing, staffing, otherExp, totalExpenses, artistGuarantee,
     splitEnabled, profitPct, artistBackendPct, promoterProfit, splitPoint, overage, artistShare, promoterShare,
     artistPayout, promoterPayout, fbRev, merchRev, otherRev, totalAddlRev,
@@ -1503,12 +1920,23 @@ async function renderShowFinancials(){
           <div>
             <div style="font-size:11px;font-weight:700;color:var(--gold);text-transform:uppercase;letter-spacing:1px;margin-bottom:.65rem">Revenue</div>
             <div style="font-size:11px;font-weight:600;color:var(--txt);margin-bottom:.35rem">Ticket Sales</div>
-            <div class="sf-row"><span>Gross ticket revenue</span><span>$${c.grossTicket.toFixed(2)}</span></div>
-            <div class="sf-row"><span>Service fees collected</span><span>$${c.feesCollected.toFixed(2)}</span></div>
-            <div class="sf-row"><span>Stripe processing est.</span><span style="color:var(--redd)">-$${c.stripeEst.toFixed(2)}</span></div>
+            <div class="sf-row"><span>Gross ticket revenue (all-in)</span><span>$${c.grossTicket.toFixed(2)}</span></div>
+            <!-- v2.11 — The Show P&L is a SETTLEMENT document an artist or agent may
+                 read. The two memo lines below are kept (they explain where the fee
+                 went and are non-deducting), but the VENUE's own slice of the fee is
+                 NOT broken out: it is folded into the OCTL line, so the fee reads as
+                 Stripe + OCTL and nothing more. The venue's share is not lost — it
+                 still flows to Additional Revenue below (Joe, Jul 13 2026: "the artist
+                 does not need to see it"). c.octlTake / c.venueFeeShare remain separate
+                 on the returned object for the export and any venue-only view.
+                 Reconciliation holds: stripeActual + octlShown === svcFeeDerived. -->
+            <div class="sf-row"><span>Less: service fee (embedded in all-in)</span><span style="color:var(--redd)">-$${c.svcFeeDerived.toFixed(2)}</span></div>
+            <div class="sf-row" style="border-top:1px dashed var(--border)"><span style="font-weight:600">Face value</span><span style="font-weight:600">$${c.faceValue.toFixed(2)}</span></div>
+            <div class="sf-row" style="padding-left:.9rem;opacity:.62;font-size:10px"><span>↳ of which Stripe</span><span>$${c.stripeActual.toFixed(2)}</span></div>
+            <div class="sf-row" style="padding-left:.9rem;opacity:.62;font-size:10px"><span>↳ of which OCTL</span><span>$${c.octlShown.toFixed(2)}</span></div>
             <div class="sf-row"><span>Facility fee (${c.paidCount} × $${(_sfData[ev.id]?.facility_fee_per_ticket||0).toFixed(2)})</span><span style="color:var(--redd)">-$${c.facilityFees.toFixed(2)}</span></div>
-            <div class="sf-row"><span>Refunds issued</span><span style="color:var(--redd)">-$${c.refundAmt.toFixed(2)}</span></div>
-            <div class="sf-row sf-subtotal"><span>Net ticket revenue (NBOR)</span><span>$${c.NBOR.toFixed(2)}</span></div>
+            <div class="sf-row"><span>Refunds issued (face)</span><span style="color:var(--redd)">-$${c.refundAmt.toFixed(2)}</span></div>
+            <div class="sf-row sf-subtotal"><span>Net ticket revenue (NBOR) <span class="form-hint" style="display:inline;font-weight:400">— face value · artist split base</span></span><span>$${c.NBOR.toFixed(2)}</span></div>
 
             ${c.venueSplitPct < 100 ? `
             <div class="sf-row"><span>Venue share (${c.venueSplitPct}%)</span><span>$${c.venueShare.toFixed(2)}</span></div>
@@ -1633,8 +2061,10 @@ function exportShowPL(eventId){
       ['Club Chaotic — Show P&L Report', ''],
       ['Event', ev.name], ['Date', ev.date||''], ['Generated', new Date().toLocaleString()],
       ['', ''], ['REVENUE', ''],
-      ['Gross Ticket Revenue', c.grossTicket], ['Service Fees Collected', c.feesCollected],
-      ['Stripe Processing Est.', -c.stripeEst], ['Facility Fee', -c.facilityFees], ['Refunds Issued', -c.refundAmt],
+      ['Gross Ticket Revenue (all-in)', c.grossTicket], ['Less: Service Fee (embedded)', -c.svcFeeDerived],
+      ['Face Value', c.faceValue],
+      ['  memo: of which Stripe', c.stripeActual], ['  memo: of which OCTL', c.octlShown],
+      ['Facility Fee', -c.facilityFees], ['Refunds Issued (face)', -c.refundAmt],
       ['Net Ticket Revenue (NBOR)', c.NBOR],
       ...(c.venueSplitPct < 100 ? [['Venue Share ('+c.venueSplitPct+'%)', c.venueShare], ['Outside Promoter Share', c.outsidePromoterShare]] : []),
       ['Food & Beverage Revenue', c.fbRev], ['Merchandise Revenue', c.merchRev], ['Other Revenue', c.otherRev],
