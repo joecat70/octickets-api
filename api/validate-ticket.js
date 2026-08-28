@@ -1,6 +1,27 @@
 // api/validate-ticket.js
 // Validates a scanned QR ticket payload (ticketId:totpCode) against Supabase.
 // Performs TOTP verification using Node crypto — no external libraries needed.
+//
+// FIX (2026-08-28): comp/reserved tickets could be scanned an unlimited
+// number of times. Root cause: the final "mark as scanned" update guarded
+// against a race condition by matching `.eq('status', 'valid')` — but
+// comp/reserved tickets never have status='valid' (their real status is
+// literally 'comp' or 'reserved', confirmed directly against
+// bailey_hall_admin_v1_18.html's issueComp()/issueHeldSeats()). That guard
+// silently matched zero rows for every comp/reserved ticket, so the status
+// never actually flipped to 'scanned' — but only `error` was checked, never
+// the affected-row count, so the endpoint still returned valid:true every
+// time. The "already scanned — duplicate entry blocked" check earlier in
+// this file could therefore never trigger for a comp/reserved ticket, since
+// its status was never anything but 'comp'/'reserved' to begin with. This
+// went live-relevant the moment bailey_hall_v1_2.html widened its QR-draw
+// gate to actually render QR codes for comp/reserved tickets — before that,
+// there was no QR to scan, so the bug was latent rather than exploitable.
+// Fix: match the update against the ticket's own current status (whatever
+// admissible value it had when read above — 'valid', 'comp', or 'reserved')
+// instead of hardcoding 'valid', and check the actual returned row(s), not
+// just `error`. A zero-row result now fails closed instead of reporting a
+// false VALID.
 
 const { createClient } = require('@supabase/supabase-js');
 const crypto = require('crypto');
@@ -216,17 +237,34 @@ module.exports = async function handler(req, res) {
   }
 
   // ── All checks passed — mark as scanned ──────────────────────────────────
+  // At this point ticket.status is one of the admissible values that made it
+  // past every check above: 'valid', 'comp', or 'reserved'. Match the update
+  // against that actual current status (not a hardcoded 'valid') so the
+  // race-condition guard works uniformly for every admissible status instead
+  // of silently no-op'ing for comp/reserved. Also check the rows actually
+  // returned, not just `error` — a zero-row match means another scan (or
+  // some other status change) won the race between the read above and this
+  // update, and must fail closed rather than report a false VALID.
   const scannedAt = new Date().toISOString();
 
-  const { error: updateError } = await db
+  const { data: updated, error: updateError } = await db
     .from('tickets')
     .update({ status: 'scanned', scanned_at: scannedAt })
     .eq('id', ticketId)
-    .eq('status', 'valid'); // Safety: only update if still valid (prevents race condition)
+    .eq('status', ticket.status) // only flip if status hasn't changed since we read it
+    .select('id');
 
   if(updateError) {
     console.error('Update error:', updateError);
     return res.status(500).json({ valid: false, reason: 'Failed to record scan' });
+  }
+
+  if(!updated || updated.length === 0) {
+    console.warn(`validate-ticket: zero-row update for ${ticketId} (expected status '${ticket.status}') — race condition, failing closed`);
+    return res.status(200).json({
+      valid:  false,
+      reason: 'Scan could not be completed — ticket status changed during validation. Try scanning again.',
+    });
   }
 
   console.log(`✓ Admitted: ${ticketId} · ${ticket.seat} · ${scannedAt}`);
