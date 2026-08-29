@@ -1,0 +1,856 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dance Studio Admin</title>
+<!-- dance_studio_admin v1.0 | NEW FILE — scoping/build session, Aug 2026.
+
+WHAT THIS IS: a separate admin tool for a dance studio's comp-ticket
+access-code system (Rebecca / Artistry Dance Academy, tied to Bailey
+Hall), built from general best-practices a former studio owner (Stella)
+described — NOT yet confirmed against Rebecca's actual, specific rules.
+Everything configurable in the Config tab exists because those specifics
+are still open questions; nothing here should be read as "this is exactly
+how Rebecca's studio works," only "this is flexible enough to match
+whatever she confirms."
+
+WHY A SEPARATE FILE, PER JOE: Rebecca (or any future studio client) has
+no reason to see Bailey Hall's Comps, Cashier, Door Scanner, revenue, or
+other shows — this file has its OWN PIN gate, entirely separate from
+Bailey Hall's Manager/Door/Cashier access. It shares Bailey Hall's
+Supabase project (SUPABASE_URL/KEY below are identical to
+bailey_hall_admin's) but only reads/writes through three NEW tables that
+touch nothing existing — see the schema block below, which Joe runs
+himself per his standing preference, not executed by Claude directly.
+Built venue/event-agnostic on purpose (event is a dropdown, not
+hardcoded) — this is a repeatable feature for future studio-shaped
+clients, not a Bailey-Hall-only one-off.
+
+BUILT IN THIS FILE (v1.0):
+  - PIN-gated login, own Settings tab to change it (mirrors Bailey Hall
+    admin's Door/Cashier PIN pattern exactly — localStorage-persisted,
+    current-PIN-verified before a new one is accepted).
+  - Config tab: pick which Bailey Hall event this roster is for; set
+    per_family vs per_student mode; comp count; whether per-family comp
+    count multiplies by student count; whether the same buyer can redeem
+    more than one code across separate purchases. All persisted per-event
+    in a new `dance_studio_config` row, not hardcoded.
+  - Upload & Preview tab: CSV upload (Student Name, Parent Email, Parent
+    Phone, Address, Family Last Name — last two optional), a dependency-
+    free parser (handles quoted fields with embedded commas). In
+    per_family mode, runs a tiered grouping pass: auto-groups on exact
+    email, exact phone, or normalized-address match (high confidence);
+    separately FLAGS same-last-name-only matches across different groups
+    for manual review — never auto-merges on last name alone, since a
+    shared surname across unrelated families is a real, not hypothetical,
+    false-positive risk. Confirm is disabled until every flag is resolved
+    (merged or dismissed). Admin can also freely merge/split groups by
+    hand before confirming. On confirm: generates one code per final
+    group, writes `access_codes` + `dance_studio_students` rows, then
+    calls a NEW server endpoint (api/dance-studio.js, action
+    'send_code_email') once per code to email it out.
+  - Students tab: lists every student for the selected event, grouped by
+    code, with status/used-at/redeemed-by/ticket IDs once used, and email
+    delivery status with a per-row Resend button plus a bulk "resend all
+    failed" — built assuming code-email delivery can fail intermittently,
+    same as Bug 2 (gift verification emails) elsewhere in this codebase,
+    not assuming it won't happen here.
+
+EXPLICITLY NOT BUILT YET — this file only manages the roster/code side.
+Two pieces remain, both flagged here so they're never mistaken for done:
+  1. Bailey Hall's own buy flow (bailey_hall_v1_2.html) has no code gate
+     yet. Per Joe's decision, ticket purchase for a code-gated event must
+     require a valid code up front — replacing "Choose Seats" outright,
+     not unlocking a bonus mid-purchase. NOT built.
+  2. Redemption/fulfillment — validating a code at checkout, creating the
+     comp tickets, and marking the code used — must happen tied to
+     confirmed Stripe payment (webhook-side), exactly like ZeroScalp's
+     approve/release split never trusts client-side state alone. api/
+     dance-studio.js below stubs a `redeem_code` action that returns
+     "not implemented" on purpose, rather than silently doing nothing.
+  Both are real, event-file-and-shared-API changes, not additions to this
+  file — the kind of change Joe asked to explicitly track as "needs to be
+  ported to Bailey Hall" versus "stays isolated here."
+
+PIN: placeholder default below (DSA_PIN default 'CHANGEME', same posture
+as Bailey Hall's DOOR_PIN/CASHIER_PIN) — set a real one in Settings
+before handing this to Rebecca. -->
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap');
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg:#15181d; --bg2:#1b1e25; --bg3:#23262e; --bg4:#2a2e38;
+    --border:#343a47; --border2:#4d5568;
+    --txt:#e8eaf0; --txt2:#a8adb8; --txt3:#9298a8;
+    --gold:#c9a84c; --goldl:rgba(201,168,76,0.12); --goldb:rgba(201,168,76,0.25);
+    --ok:#1d9e75; --okl:rgba(29,158,117,0.12); --okd:#22c97a;
+    --red:#c0392b; --redl:rgba(192,57,43,0.12); --redd:#e07070;
+    --amber:#d97706; --amberl:rgba(217,119,6,0.12); --amberd:#d9a45c;
+    --blue:#3d7abf; --bluel:rgba(61,122,191,0.12);
+    --purple:#8c5ec9; --purplel:rgba(140,94,201,0.12);
+    --fm:'IBM Plex Mono',monospace; --fs:'IBM Plex Sans',sans-serif;
+    --radius:4px; --shadow:0 4px 24px rgba(0,0,0,0.5);
+  }
+  html,body { height:100%; background:var(--bg); color:var(--txt); font-family:var(--fs); }
+  body::before {
+    content:''; position:fixed; inset:0;
+    background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.03) 2px,rgba(0,0,0,0.03) 4px);
+    pointer-events:none; z-index:9999;
+  }
+  .btn { display:inline-flex; align-items:center; justify-content:center; gap:.4rem; padding:10px 18px; border-radius:var(--radius); font-family:var(--fs); font-size:13px; font-weight:600; cursor:pointer; border:1px solid transparent; transition:all .15s; }
+  .btn-gold { background:var(--gold); color:#0d0f12; border-color:var(--gold); width:100%; padding:12px; font-family:var(--fm); font-size:12px; letter-spacing:1px; text-transform:uppercase; }
+  .btn-gold:hover { background:#d4b05a; }
+  .btn-gold:disabled { opacity:.5; cursor:not-allowed; }
+  .btn-ghost { background:transparent; color:var(--txt2); border-color:var(--border2); }
+  .btn-ghost:hover { background:var(--bg3); color:var(--txt); }
+  .btn-ok { background:var(--ok); color:#fff; border-color:var(--ok); font-family:var(--fm); font-size:11px; letter-spacing:1px; text-transform:uppercase; }
+  .btn-ok:hover { background:#1fb880; }
+  .btn-ok:disabled { opacity:.5; cursor:not-allowed; }
+  .btn-danger { background:transparent; color:var(--red); border-color:var(--red); font-family:var(--fm); font-size:11px; letter-spacing:1px; text-transform:uppercase; }
+  .btn-danger:hover { background:var(--redl); }
+  .btn-amber { background:transparent; color:var(--amber); border-color:var(--amber); font-family:var(--fm); font-size:11px; letter-spacing:1px; text-transform:uppercase; }
+  .btn-amber:hover { background:var(--amberl); }
+  .btn-sm { padding:6px 12px; font-size:11px; }
+  .form-label { display:block; font-family:var(--fm); font-size:9px; font-weight:600; letter-spacing:2px; text-transform:uppercase; color:var(--txt3); margin-bottom:.5rem; }
+  .form-input { width:100%; background:var(--bg4); border:1px solid var(--border2); border-radius:var(--radius); padding:10px 14px; font-family:var(--fm); font-size:13px; color:var(--txt); outline:none; transition:border-color .15s; }
+  .form-input:focus { border-color:var(--gold); }
+  .form-input::placeholder { color:var(--txt3); }
+  select.form-input { cursor:pointer; }
+  .form-group { margin-bottom:1.25rem; }
+  .form-hint { font-family:var(--fm); font-size:10px; color:var(--txt3); margin-top:4px; line-height:1.5; }
+  .form-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .form-grid .span2 { grid-column:1/-1; }
+  .err-msg { background:var(--redl); border:1px solid rgba(192,57,43,0.3); border-radius:var(--radius); padding:.65rem .85rem; font-size:12px; color:var(--redd); margin-bottom:1rem; font-family:var(--fm); }
+  .info-box { border-radius:var(--radius); padding:.75rem 1rem; font-size:12px; line-height:1.6; margin-bottom:.75rem; }
+  .info-gold { background:var(--goldl); border:1px solid var(--goldb); color:var(--gold); }
+  .info-ok { background:var(--okl); border:1px solid rgba(29,158,117,0.3); color:var(--ok); }
+  .info-amber { background:var(--amberl); border:1px solid rgba(217,119,6,0.3); color:var(--amber); }
+  .info-blue { background:var(--bluel); border:1px solid rgba(61,122,191,0.3); color:var(--blue); }
+  .info-purple { background:var(--purplel); border:1px solid rgba(140,94,201,0.3); color:var(--purple); }
+  .card { background:var(--bg3); border:1px solid var(--border); border-radius:var(--radius); padding:.85rem 1rem; margin-bottom:.75rem; }
+  .empty { text-align:center; color:var(--txt3); font-family:var(--fm); font-size:12px; padding:2rem 0; }
+  .spinner { display:inline-block; width:14px; height:14px; border:2px solid var(--border2); border-top-color:var(--gold); border-radius:50%; animation:spin .7s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .pill { display:inline-block; font-family:var(--fm); font-size:10px; font-weight:700; letter-spacing:.5px; border-radius:10px; padding:3px 9px; text-transform:uppercase; }
+  .pill-ok { background:var(--okl); color:var(--okd); border:1px solid rgba(29,158,117,0.3); }
+  .pill-amber { background:var(--amberl); color:var(--amberd); border:1px solid rgba(217,119,6,0.3); }
+  .pill-red { background:var(--redl); color:var(--redd); border:1px solid rgba(192,57,43,0.3); }
+  .pill-gray { background:var(--bg4); color:var(--txt3); border:1px solid var(--border2); }
+  .mono { font-family:var(--fm); }
+
+  /* ── LOGIN ── */
+  #login-screen { min-height:100vh; display:flex; align-items:center; justify-content:center; padding:1.5rem; }
+  .login-wrap { max-width:380px; width:100%; }
+  .login-mark { text-align:center; margin-bottom:1.5rem; }
+  .login-mark-logo { font-family:var(--fm); font-size:11px; letter-spacing:2px; color:var(--txt3); text-transform:uppercase; }
+  .login-mark-title { font-size:22px; font-weight:700; margin:.35rem 0; }
+  .login-mark-sub { font-family:var(--fm); font-size:11px; color:var(--txt3); letter-spacing:1px; }
+  .login-panel { background:var(--bg2); border:1px solid var(--border); border-radius:8px; padding:1.75rem; }
+
+  /* ── SHELL ── */
+  .topbar { display:flex; justify-content:space-between; align-items:center; padding:.85rem 1.5rem; background:var(--bg2); border-bottom:1px solid var(--border); }
+  .topbar-left, .topbar-right { display:flex; align-items:center; gap:.85rem; }
+  .topbar-logo { font-weight:700; font-size:14px; }
+  .topbar-divider { width:1px; height:18px; background:var(--border2); }
+  .topbar-title { font-family:var(--fm); font-size:11px; color:var(--txt3); letter-spacing:1px; text-transform:uppercase; }
+  .version-pill { font-family:var(--fm); font-size:10px; font-weight:700; letter-spacing:.5px; color:var(--gold); background:var(--goldl); border:1px solid var(--goldb); border-radius:10px; padding:3px 9px; }
+  .db-status { display:flex; align-items:center; gap:6px; font-family:var(--fm); font-size:11px; color:var(--txt3); }
+  .db-dot { width:7px; height:7px; border-radius:50%; background:var(--txt3); }
+  .db-dot.ok { background:var(--okd); }
+  .db-dot.err { background:var(--redd); }
+  .content { padding:1.5rem; max-width:1100px; margin:0 auto; }
+  .tab-nav { display:flex; gap:6px; margin-bottom:1.25rem; flex-wrap:wrap; border-bottom:1px solid var(--border); }
+  .tab-btn { background:transparent; border:none; border-bottom:2px solid transparent; color:var(--txt3); font-family:var(--fm); font-size:11px; letter-spacing:.8px; text-transform:uppercase; padding:.7rem .9rem; cursor:pointer; }
+  .tab-btn:hover { color:var(--txt2); }
+  .tab-btn.active { color:var(--gold); border-bottom-color:var(--gold); }
+  .tab-panel { display:none; }
+  .tab-panel.active { display:block; }
+  .card-title-lg { font-size:16px; font-weight:700; }
+  .section-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem; flex-wrap:wrap; gap:.5rem; }
+
+  /* ── UPLOAD / PREVIEW ── */
+  .dropzone { border:2px dashed var(--border2); border-radius:8px; padding:2rem; text-align:center; cursor:pointer; transition:border-color .15s, background .15s; }
+  .dropzone:hover, .dropzone.drag { border-color:var(--gold); background:var(--goldl); }
+  .group-card { border-left:3px solid var(--border2); }
+  .group-card.matched-email, .group-card.matched-phone, .group-card.matched-address { border-left-color:var(--ok); }
+  .group-card.single { border-left-color:var(--border2); }
+  .student-row { display:flex; justify-content:space-between; align-items:center; padding:.4rem 0; border-bottom:1px solid var(--border); font-size:12px; }
+  .student-row:last-child { border-bottom:none; }
+  .suggestion-card { border-left:3px solid var(--amber); }
+
+  /* ── STUDENTS TABLE ── */
+  .stu-row { display:grid; grid-template-columns: 1.6fr 1.4fr 1fr .8fr .9fr 1fr auto; gap:10px; align-items:center; padding:.6rem 0; border-bottom:1px solid var(--border); font-size:12px; }
+  .stu-row.head { font-family:var(--fm); font-size:9px; letter-spacing:1px; text-transform:uppercase; color:var(--txt3); }
+  .stu-names { font-weight:600; }
+  .stu-sub { color:var(--txt3); font-size:11px; }
+
+  @media (max-width:800px) {
+    .stu-row { grid-template-columns: 1fr 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ── LOGIN ── -->
+<div id="login-screen">
+  <div class="login-wrap">
+    <div class="login-mark">
+      <div class="login-mark-logo">OC Tickets Live</div>
+      <div class="login-mark-title">Dance Studio Admin</div>
+      <div class="login-mark-sub">Comp Ticket &amp; Access Code Manager</div>
+    </div>
+    <div class="login-panel">
+      <div id="login-err" class="err-msg" style="display:none"></div>
+      <div class="form-group" style="margin-bottom:1rem">
+        <label class="form-label" for="dsa-pin">Access PIN</label>
+        <input class="form-input" type="password" id="dsa-pin" placeholder="••••••••" maxlength="8" onkeydown="if(event.key==='Enter')checkDsaPin()">
+      </div>
+      <button class="btn btn-gold" onclick="checkDsaPin()">Sign In →</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── APP ── -->
+<div id="app" style="display:none">
+  <div class="topbar">
+    <div class="topbar-left">
+      <div class="topbar-logo">Dance Studio Admin</div>
+      <div class="topbar-divider"></div>
+      <div class="topbar-title" id="topbar-studio-name">No event selected</div>
+    </div>
+    <div class="topbar-right">
+      <span class="version-pill">dance_studio_admin v1.0</span>
+      <div class="topbar-divider"></div>
+      <div class="db-status"><div class="db-dot" id="db-dot"></div><span id="db-status-text">Connecting…</span></div>
+      <div class="topbar-divider"></div>
+      <button class="btn btn-ghost btn-sm" onclick="doSignOut()">Sign Out</button>
+    </div>
+  </div>
+
+  <div class="content">
+    <div class="tab-nav">
+      <button class="tab-btn active" onclick="showTab('config')">Config</button>
+      <button class="tab-btn" onclick="showTab('upload')">Upload &amp; Preview</button>
+      <button class="tab-btn" onclick="showTab('students')">Students</button>
+      <button class="tab-btn" onclick="showTab('settings')">⚙ Settings</button>
+    </div>
+
+    <!-- ── CONFIG ── -->
+    <div id="tab-config" class="tab-panel active">
+      <div class="card-title-lg" style="margin-bottom:1rem">Config</div>
+
+      <div class="info-box info-purple">Every setting here is a guess at what Rebecca's studio needs, based on general practice a former studio owner described — not yet confirmed against her actual rules. Nothing is locked in; adjust freely as she clarifies specifics.</div>
+
+      <div class="form-group">
+        <label class="form-label">Event</label>
+        <select class="form-input" id="cfg-event-select" onchange="onEventChange()">
+          <option value="">Loading events…</option>
+        </select>
+        <div class="form-hint">Pulled from the shared events table, filtered to Bailey Hall. This tool is built venue-agnostic — the event picker is what scopes everything below, not a hardcoded venue.</div>
+      </div>
+
+      <div id="cfg-fields" style="display:none">
+        <div class="form-grid">
+          <div class="form-group">
+            <label class="form-label">Comp allocation mode</label>
+            <select class="form-input" id="cfg-mode">
+              <option value="per_family">Per family (flat, regardless of student count)</option>
+              <option value="per_student">Per student (one code per enrolled kid)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Comps per code</label>
+            <input class="form-input" type="number" id="cfg-comp-count" value="2" min="1">
+          </div>
+        </div>
+
+        <div class="form-group" id="cfg-multiplier-group">
+          <label class="form-label">In per-family mode</label>
+          <select class="form-input" id="cfg-family-multiplier">
+            <option value="false">Flat comp count per family, regardless of kids enrolled</option>
+            <option value="true">Multiply comp count × number of students in the family</option>
+          </select>
+          <div class="form-hint">Rebecca hasn't confirmed which she wants yet — default is flat, matching what Stella described her own studio doing.</div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Same buyer, multiple codes</label>
+          <select class="form-input" id="cfg-allow-multi">
+            <option value="true">Allowed — a family can redeem more than one code across separate purchases</option>
+            <option value="false">Blocked — one redemption per email/phone, ever, for this event</option>
+          </select>
+          <div class="form-hint">This is the studio's call, not ours. Default is allowed; Rebecca can tighten it once she decides.</div>
+        </div>
+
+        <button class="btn btn-ok" onclick="saveConfig()">Save Config</button>
+        <span id="cfg-save-status" style="margin-left:.75rem;font-family:var(--fm);font-size:11px"></span>
+      </div>
+    </div>
+
+    <!-- ── UPLOAD & PREVIEW ──────────────────────────────────────────────
+         Grouping only runs in per_family mode (see saved Config above).
+         In per_student mode every CSV row is simply its own group — no
+         matching needed, so the preview step just confirms row counts. -->
+    <div id="tab-upload" class="tab-panel">
+      <div class="card-title-lg" style="margin-bottom:1rem">Upload &amp; Preview</div>
+      <div id="upload-no-event" class="info-box info-amber">Select an event in Config first.</div>
+
+      <div id="upload-body" style="display:none">
+        <div class="info-box info-blue">
+          Expected CSV columns (header row required): <span class="mono">Student Name, Parent Email, Parent Phone, Address, Family Last Name</span>. Address and Family Last Name are optional but improve grouping accuracy — Address is the stronger signal of the two.
+        </div>
+
+        <div class="dropzone" id="dropzone" onclick="document.getElementById('csv-file').click()">
+          <div style="font-size:14px;margin-bottom:.4rem">📄 Click to choose a CSV, or drag one here</div>
+          <div class="form-hint">Nothing is written to the database until you confirm the preview below.</div>
+        </div>
+        <input type="file" id="csv-file" accept=".csv" style="display:none" onchange="handleCsvFile(this.files[0])">
+
+        <div id="upload-parse-status" style="margin-top:1rem"></div>
+
+        <div id="preview-area" style="display:none;margin-top:1.5rem">
+          <div class="section-header">
+            <div class="card-title-lg" style="font-size:14px">Preview</div>
+            <div id="preview-summary" class="form-hint"></div>
+          </div>
+
+          <div id="suggestions-area"></div>
+          <div id="groups-area"></div>
+
+          <div style="margin-top:1.25rem;display:flex;align-items:center;gap:.75rem">
+            <button class="btn btn-gold" style="width:auto" id="confirm-generate-btn" onclick="confirmAndGenerateCodes()">Confirm &amp; Generate Codes →</button>
+            <span id="confirm-blocked-note" class="form-hint" style="display:none;color:var(--amberd)">Resolve all flagged suggestions below before generating codes.</span>
+          </div>
+          <div id="generate-status" style="margin-top:1rem"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── STUDENTS ── -->
+    <div id="tab-students" class="tab-panel">
+      <div class="section-header">
+        <div class="card-title-lg">Students</div>
+        <div style="display:flex;gap:.5rem">
+          <button class="btn btn-ghost btn-sm" onclick="loadStudents()">↻ Reload</button>
+          <button class="btn btn-amber btn-sm" onclick="bulkResendFailed()">Resend All Failed</button>
+        </div>
+      </div>
+      <div id="students-no-event" class="info-box info-amber">Select an event in Config first.</div>
+      <div id="students-body" style="display:none">
+        <div class="form-group">
+          <input class="form-input" id="students-search" placeholder="Search by student name, parent contact, or code…" oninput="renderStudents()">
+        </div>
+        <div id="students-summary" class="form-hint" style="margin-bottom:.75rem"></div>
+        <div class="stu-row head">
+          <div>Student(s)</div><div>Parent contact</div><div>Code</div><div>Status</div><div>Used at</div><div>Email</div><div></div>
+        </div>
+        <div id="students-list"></div>
+      </div>
+    </div>
+
+    <!-- ── SETTINGS ── -->
+    <div id="tab-settings" class="tab-panel">
+      <div class="card-title-lg" style="margin-bottom:1rem">Settings</div>
+      <div class="card">
+        <div class="form-group" style="margin-bottom:.75rem">
+          <label class="form-label">Change Access PIN</label>
+          <input class="form-input" type="password" id="settings-current-pin" placeholder="Current PIN" maxlength="8" style="margin-bottom:.5rem">
+          <input class="form-input" type="password" id="settings-new-pin" placeholder="New PIN (max 8 chars)" maxlength="8">
+        </div>
+        <button class="btn btn-ok btn-sm" onclick="settingsChangeDsaPin()">Update PIN</button>
+        <div id="settings-pin-status" class="form-hint" style="margin-top:.5rem"></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+// ══════════════════════════════════════════════════════════════════════
+// CONFIG — identical Supabase project to Bailey Hall's own admin file.
+// This tool only ever touches the three new tables described in the
+// header comment; nothing here reads or writes any existing table
+// except a read-only select against `events` (to populate the picker).
+// ══════════════════════════════════════════════════════════════════════
+const SUPABASE_URL = 'https://uruepqyiupmmvwmvjrie.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_3K3JxO9uhq7zUvY0C29tRQ_MBBbTNcd';
+const VERCEL_API   = 'https://octickets-api.vercel.app';
+const VENUE_ID     = 'baileyhall'; // which venue's events populate the Config dropdown — the ONLY hardcoded venue reference in this file, by design (see header comment on venue-agnostic build)
+
+const DSA_PIN_STORAGE_KEY = 'octl_dance_studio_admin_pin';
+let DSA_PIN = localStorage.getItem(DSA_PIN_STORAGE_KEY) || 'CHANGEME'; // placeholder — set a real one in Settings before handing this to Rebecca
+
+const db = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
+  auth: { persistSession: true, autoRefreshToken: true }
+});
+
+let CURRENT_EVENT_ID = null;
+let CURRENT_EVENT_NAME = '';
+let CURRENT_CONFIG = null; // loaded/saved dance_studio_config row for the selected event
+let PREVIEW_ROWS = [];     // parsed CSV rows for the current upload
+let PREVIEW_GROUPS = [];   // working groups (mutable — merge/split before confirm)
+let PREVIEW_SUGGESTIONS = []; // [{groupA, groupB, reason, resolved}]
+let STUDENTS_CACHE = [];   // loaded students+codes for the Students tab
+
+// ── LOGIN ────────────────────────────────────────────────────────────
+function checkDsaPin() {
+  const val = document.getElementById('dsa-pin').value;
+  const errEl = document.getElementById('login-err');
+  if (val === DSA_PIN) {
+    document.getElementById('login-screen').style.display = 'none';
+    document.getElementById('app').style.display = 'block';
+    errEl.style.display = 'none';
+    initApp();
+  } else {
+    errEl.textContent = 'Incorrect PIN.';
+    errEl.style.display = 'block';
+  }
+}
+function doSignOut() {
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('login-screen').style.display = 'flex';
+  document.getElementById('dsa-pin').value = '';
+}
+function settingsChangeDsaPin() {
+  const cur = document.getElementById('settings-current-pin').value;
+  const next = document.getElementById('settings-new-pin').value;
+  const statusEl = document.getElementById('settings-pin-status');
+  if (cur !== DSA_PIN) { statusEl.textContent = 'Current PIN is incorrect.'; statusEl.style.color = 'var(--redd)'; return; }
+  if (!next || next.length < 4) { statusEl.textContent = 'New PIN must be at least 4 characters.'; statusEl.style.color = 'var(--redd)'; return; }
+  DSA_PIN = next;
+  localStorage.setItem(DSA_PIN_STORAGE_KEY, next);
+  document.getElementById('settings-current-pin').value = '';
+  document.getElementById('settings-new-pin').value = '';
+  statusEl.textContent = '✓ PIN updated.';
+  statusEl.style.color = 'var(--okd)';
+}
+
+// ── TABS ─────────────────────────────────────────────────────────────
+function showTab(name) {
+  document.querySelectorAll('.tab-panel').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  [...document.querySelectorAll('.tab-btn')].find(b => b.getAttribute('onclick') === `showTab('${name}')`)?.classList.add('active');
+  if (name === 'students') loadStudents();
+}
+
+// ── APP INIT ─────────────────────────────────────────────────────────
+async function initApp() {
+  const dbDot = document.getElementById('db-dot');
+  const dbText = document.getElementById('db-status-text');
+  try {
+    const { error } = await db.from('events').select('id').limit(1);
+    if (error) throw error;
+    dbDot.classList.add('ok'); dbText.textContent = 'Connected';
+  } catch (e) {
+    dbDot.classList.add('err'); dbText.textContent = 'Connection error';
+  }
+  await loadEventOptions();
+}
+
+async function loadEventOptions() {
+  const sel = document.getElementById('cfg-event-select');
+  const { data, error } = await db.from('events').select('id, name, date').eq('venue_id', VENUE_ID).order('date', { ascending: true });
+  if (error || !data) { sel.innerHTML = '<option value="">Failed to load events</option>'; return; }
+  sel.innerHTML = '<option value="">Select an event…</option>' + data.map(e =>
+    `<option value="${e.id}">${escapeHtml(e.name)} — ${e.date}</option>`
+  ).join('');
+}
+
+function onEventChange() {
+  const sel = document.getElementById('cfg-event-select');
+  CURRENT_EVENT_ID = sel.value || null;
+  CURRENT_EVENT_NAME = sel.selectedOptions[0]?.textContent || '';
+  document.getElementById('topbar-studio-name').textContent = CURRENT_EVENT_ID ? CURRENT_EVENT_NAME : 'No event selected';
+  document.getElementById('cfg-fields').style.display = CURRENT_EVENT_ID ? 'block' : 'none';
+  document.getElementById('upload-no-event').style.display = CURRENT_EVENT_ID ? 'none' : 'block';
+  document.getElementById('upload-body').style.display = CURRENT_EVENT_ID ? 'block' : 'none';
+  document.getElementById('students-no-event').style.display = CURRENT_EVENT_ID ? 'none' : 'block';
+  document.getElementById('students-body').style.display = CURRENT_EVENT_ID ? 'block' : 'none';
+  if (CURRENT_EVENT_ID) loadConfig();
+}
+
+// ── CONFIG TAB ───────────────────────────────────────────────────────
+async function loadConfig() {
+  const { data } = await db.from('dance_studio_config').select('*').eq('event_id', CURRENT_EVENT_ID).maybeSingle();
+  CURRENT_CONFIG = data || { event_id: CURRENT_EVENT_ID, mode: 'per_family', comp_count: 2, family_multiplier: false, allow_multiple_codes: true };
+  document.getElementById('cfg-mode').value = CURRENT_CONFIG.mode;
+  document.getElementById('cfg-comp-count').value = CURRENT_CONFIG.comp_count;
+  document.getElementById('cfg-family-multiplier').value = String(CURRENT_CONFIG.family_multiplier);
+  document.getElementById('cfg-allow-multi').value = String(CURRENT_CONFIG.allow_multiple_codes);
+}
+
+async function saveConfig() {
+  const statusEl = document.getElementById('cfg-save-status');
+  const row = {
+    event_id: CURRENT_EVENT_ID,
+    mode: document.getElementById('cfg-mode').value,
+    comp_count: parseInt(document.getElementById('cfg-comp-count').value, 10) || 2,
+    family_multiplier: document.getElementById('cfg-family-multiplier').value === 'true',
+    allow_multiple_codes: document.getElementById('cfg-allow-multi').value === 'true',
+    updated_at: new Date().toISOString(),
+  };
+  const { error } = await db.from('dance_studio_config').upsert(row, { onConflict: 'event_id' });
+  CURRENT_CONFIG = row;
+  statusEl.textContent = error ? 'Save failed: ' + error.message : '✓ Saved';
+  statusEl.style.color = error ? 'var(--redd)' : 'var(--okd)';
+}
+
+// ── NORMALIZATION + GROUPING (see grouping.js in the same working
+// session for the isolated, unit-tested version this was ported from —
+// logic here is byte-identical, just inlined) ───────────────────────
+function normalizeEmail(e) { return (e || '').trim().toLowerCase(); }
+function normalizePhone(p) { return (p || '').replace(/\D/g, '').slice(-10); }
+const STREET_ABBR = [
+  [/\bstreet\b/g, 'st'], [/\bavenue\b/g, 'ave'], [/\bboulevard\b/g, 'blvd'],
+  [/\bdrive\b/g, 'dr'], [/\broad\b/g, 'rd'], [/\blane\b/g, 'ln'],
+  [/\bcourt\b/g, 'ct'], [/\bplace\b/g, 'pl'], [/\bterrace\b/g, 'ter'],
+  [/\bcircle\b/g, 'cir'], [/\bhighway\b/g, 'hwy'], [/\bparkway\b/g, 'pkwy'],
+];
+function normalizeAddress(a) {
+  if (!a) return '';
+  let s = a.trim().toLowerCase();
+  s = s.replace(/[.,#]/g, ' ');
+  s = s.replace(/\b(apt|apartment|unit|suite|ste|#)\s*\S*/g, ' ');
+  for (const [re, rep] of STREET_ABBR) s = s.replace(re, rep);
+  s = s.replace(/\s+/g, ' ').trim();
+  return s;
+}
+function deriveLastName(row) {
+  if (row.familyLastName) return row.familyLastName.trim().toLowerCase();
+  const parts = (row.studentName || '').trim().split(/\s+/);
+  return parts.length > 1 ? parts[parts.length - 1].toLowerCase() : '';
+}
+class UnionFind {
+  constructor(n) { this.parent = Array.from({ length: n }, (_, i) => i); }
+  find(i) { while (this.parent[i] !== i) { this.parent[i] = this.parent[this.parent[i]]; i = this.parent[i]; } return i; }
+  union(a, b) { const ra = this.find(a), rb = this.find(b); if (ra !== rb) this.parent[ra] = rb; }
+}
+function groupStudents(rows, mode) {
+  if (mode === 'per_student') {
+    return { groups: rows.map((_, i) => ({ id: 'g' + i, memberIdxs: [i], matchedOn: [] })), suggestions: [] };
+  }
+  const n = rows.length;
+  const uf = new UnionFind(n);
+  const matchedOnPair = {};
+  const norm = rows.map(r => ({
+    email: normalizeEmail(r.parentEmail), phone: normalizePhone(r.parentPhone),
+    addr: normalizeAddress(r.address), lastName: deriveLastName(r),
+  }));
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const a = norm[i], b = norm[j];
+      const reasons = [];
+      if (a.email && a.email === b.email) reasons.push('email');
+      if (a.phone && a.phone === b.phone) reasons.push('phone');
+      if (a.addr && a.addr === b.addr) reasons.push('address');
+      if (reasons.length) { uf.union(i, j); matchedOnPair[i + '-' + j] = reasons; }
+    }
+  }
+  const rootToGroup = new Map();
+  for (let i = 0; i < n; i++) {
+    const root = uf.find(i);
+    if (!rootToGroup.has(root)) rootToGroup.set(root, { id: 'g' + root, memberIdxs: [], matchedOn: new Set() });
+    rootToGroup.get(root).memberIdxs.push(i);
+  }
+  for (const key in matchedOnPair) {
+    const [i] = key.split('-').map(Number);
+    const g = rootToGroup.get(uf.find(i));
+    if (g) matchedOnPair[key].forEach(r => g.matchedOn.add(r));
+  }
+  const groups = [...rootToGroup.values()].map(g => ({ ...g, matchedOn: [...g.matchedOn] }));
+  const rowToGroupIdx = new Array(n);
+  groups.forEach((g, gi) => g.memberIdxs.forEach(idx => { rowToGroupIdx[idx] = gi; }));
+  const suggestions = [];
+  const seenPairs = new Set();
+  for (let i = 0; i < n; i++) {
+    if (!norm[i].lastName) continue;
+    for (let j = i + 1; j < n; j++) {
+      if (rowToGroupIdx[i] === rowToGroupIdx[j]) continue;
+      if (norm[j].lastName && norm[i].lastName === norm[j].lastName) {
+        const gi = rowToGroupIdx[i], gj = rowToGroupIdx[j];
+        const pairKey = [gi, gj].sort().join('-');
+        if (seenPairs.has(pairKey)) continue;
+        seenPairs.add(pairKey);
+        suggestions.push({ groupA: gi, groupB: gj, reason: `Same last name ("${norm[i].lastName}"), no other match — verify before merging`, resolved: false });
+      }
+    }
+  }
+  return { groups, suggestions };
+}
+
+// ── CSV PARSING — dependency-free, handles quoted fields with embedded
+// commas (a common Excel/Sheets export quirk), which a naive split(',')
+// would silently corrupt. ───────────────────────────────────────────
+function parseCsv(text) {
+  const rows = [];
+  let row = [], field = '', inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i], next = text[i + 1];
+    if (inQuotes) {
+      if (c === '"' && next === '"') { field += '"'; i++; }
+      else if (c === '"') { inQuotes = false; }
+      else { field += c; }
+    } else {
+      if (c === '"') inQuotes = true;
+      else if (c === ',') { row.push(field); field = ''; }
+      else if (c === '\n' || c === '\r') {
+        if (c === '\r' && next === '\n') i++;
+        row.push(field); field = '';
+        if (row.some(f => f.trim() !== '')) rows.push(row);
+        row = [];
+      } else field += c;
+    }
+  }
+  if (field !== '' || row.length) { row.push(field); rows.push(row); }
+  if (!rows.length) return [];
+  const headers = rows[0].map(h => h.trim().toLowerCase());
+  const col = (names) => headers.findIndex(h => names.includes(h));
+  const iName = col(['student name', 'student']);
+  const iEmail = col(['parent email', 'email']);
+  const iPhone = col(['parent phone', 'phone']);
+  const iAddr = col(['address']);
+  const iLast = col(['family last name', 'family lastname', 'last name']);
+  return rows.slice(1).map(r => ({
+    studentName: (r[iName] || '').trim(),
+    parentEmail: (r[iEmail] || '').trim(),
+    parentPhone: (r[iPhone] || '').trim(),
+    address: iAddr >= 0 ? (r[iAddr] || '').trim() : '',
+    familyLastName: iLast >= 0 ? (r[iLast] || '').trim() : '',
+  })).filter(r => r.studentName);
+}
+
+// ── UPLOAD & PREVIEW ─────────────────────────────────────────────────
+document.getElementById('dropzone')?.addEventListener('dragover', e => { e.preventDefault(); e.currentTarget.classList.add('drag'); });
+document.getElementById('dropzone')?.addEventListener('dragleave', e => e.currentTarget.classList.remove('drag'));
+document.getElementById('dropzone')?.addEventListener('drop', e => {
+  e.preventDefault(); e.currentTarget.classList.remove('drag');
+  if (e.dataTransfer.files[0]) handleCsvFile(e.dataTransfer.files[0]);
+});
+
+function handleCsvFile(file) {
+  if (!file) return;
+  const statusEl = document.getElementById('upload-parse-status');
+  const reader = new FileReader();
+  reader.onload = () => {
+    const rows = parseCsv(reader.result);
+    if (!rows.length) {
+      statusEl.innerHTML = `<div class="info-box info-amber">No valid rows found — check the CSV has a header row and a Student Name column.</div>`;
+      return;
+    }
+    PREVIEW_ROWS = rows;
+    const mode = CURRENT_CONFIG?.mode || 'per_family';
+    const result = groupStudents(rows, mode);
+    PREVIEW_GROUPS = result.groups;
+    PREVIEW_SUGGESTIONS = result.suggestions;
+    statusEl.innerHTML = `<div class="info-box info-ok">✓ Parsed ${rows.length} student row(s).</div>`;
+    renderPreview();
+  };
+  reader.readAsText(file);
+}
+
+function renderPreview() {
+  document.getElementById('preview-area').style.display = 'block';
+  document.getElementById('preview-summary').textContent =
+    `${PREVIEW_ROWS.length} students → ${PREVIEW_GROUPS.length} code(s)` + (PREVIEW_SUGGESTIONS.length ? ` · ${PREVIEW_SUGGESTIONS.filter(s => !s.resolved).length} flag(s) need review` : '');
+
+  const sugArea = document.getElementById('suggestions-area');
+  const unresolved = PREVIEW_SUGGESTIONS.filter(s => !s.resolved);
+  sugArea.innerHTML = unresolved.length ? `<div class="card-title-lg" style="font-size:13px;margin-bottom:.5rem">⚠ Needs review</div>` +
+    unresolved.map((s, i) => {
+      const gA = PREVIEW_GROUPS[s.groupA], gB = PREVIEW_GROUPS[s.groupB];
+      if (!gA || !gB) return '';
+      const namesA = gA.memberIdxs.map(idx => PREVIEW_ROWS[idx].studentName).join(', ');
+      const namesB = gB.memberIdxs.map(idx => PREVIEW_ROWS[idx].studentName).join(', ');
+      const realIdx = PREVIEW_SUGGESTIONS.indexOf(s);
+      return `<div class="card suggestion-card">
+        <div style="font-size:12px;margin-bottom:.4rem">${escapeHtml(s.reason)}</div>
+        <div style="font-size:12px;color:var(--txt2);margin-bottom:.6rem">"${escapeHtml(namesA)}" &nbsp;vs&nbsp; "${escapeHtml(namesB)}"</div>
+        <button class="btn btn-ok btn-sm" onclick="resolveSuggestion(${realIdx}, true)">Merge into one family</button>
+        <button class="btn btn-ghost btn-sm" onclick="resolveSuggestion(${realIdx}, false)">Keep separate</button>
+      </div>`;
+    }).join('') : '';
+
+  const groupsArea = document.getElementById('groups-area');
+  groupsArea.innerHTML = `<div class="card-title-lg" style="font-size:13px;margin:1rem 0 .5rem">Groups (${PREVIEW_GROUPS.length})</div>` +
+    PREVIEW_GROUPS.map((g, gi) => {
+      const matchClass = g.matchedOn.length ? 'matched-' + g.matchedOn[0] : 'single';
+      const rows = g.memberIdxs.map(idx => {
+        const r = PREVIEW_ROWS[idx];
+        return `<div class="student-row"><span>${escapeHtml(r.studentName)}</span><span style="color:var(--txt3)">${escapeHtml(r.parentEmail || r.parentPhone || '—')}</span></div>`;
+      }).join('');
+      const matchLabel = g.matchedOn.length ? `Matched on: ${g.matchedOn.join(', ')}` : 'Single student, no match';
+      return `<div class="card group-card ${matchClass}">
+        <div class="section-header" style="margin-bottom:.4rem">
+          <span class="mono" style="font-size:10px;color:var(--txt3)">${matchLabel}</span>
+          <span class="pill pill-gray">${g.memberIdxs.length} student${g.memberIdxs.length > 1 ? 's' : ''} → 1 code</span>
+        </div>
+        ${rows}
+      </div>`;
+    }).join('');
+
+  const blocked = PREVIEW_SUGGESTIONS.some(s => !s.resolved);
+  document.getElementById('confirm-generate-btn').disabled = blocked;
+  document.getElementById('confirm-blocked-note').style.display = blocked ? 'inline' : 'none';
+}
+
+function resolveSuggestion(idx, merge) {
+  const s = PREVIEW_SUGGESTIONS[idx];
+  s.resolved = true;
+  if (merge) {
+    const gA = PREVIEW_GROUPS[s.groupA], gB = PREVIEW_GROUPS[s.groupB];
+    gA.memberIdxs = gA.memberIdxs.concat(gB.memberIdxs);
+    gA.matchedOn = [...new Set([...gA.matchedOn, 'last name (manual)'])];
+    PREVIEW_GROUPS.splice(s.groupB, 1);
+    // Re-index every suggestion's group pointers since group B was removed
+    PREVIEW_SUGGESTIONS.forEach(other => {
+      if (other === s) return;
+      [['groupA'], ['groupB']].forEach(([k]) => {
+        if (other[k] === s.groupB) other[k] = s.groupA;
+        else if (other[k] > s.groupB) other[k] -= 1;
+      });
+    });
+  }
+  renderPreview();
+}
+
+async function confirmAndGenerateCodes() {
+  const statusEl = document.getElementById('generate-status');
+  const btn = document.getElementById('confirm-generate-btn');
+  btn.disabled = true; btn.textContent = 'Generating…';
+  const cfg = CURRENT_CONFIG || { comp_count: 2, family_multiplier: false };
+
+  let created = 0, emailFailed = 0;
+  for (const g of PREVIEW_GROUPS) {
+    const members = g.memberIdxs.map(idx => PREVIEW_ROWS[idx]);
+    const compCount = cfg.family_multiplier ? cfg.comp_count * members.length : cfg.comp_count;
+    const code = generateCode();
+    const primaryContact = members.find(m => m.parentEmail) || members[0];
+
+    const { error: codeErr } = await db.from('access_codes').insert({
+      id: code, code, event_id: CURRENT_EVENT_ID, venue_id: VENUE_ID,
+      comp_count: compCount, status: 'unused', email_status: 'pending',
+      created_at: new Date().toISOString(),
+    });
+    if (codeErr) { statusEl.innerHTML += `<div class="info-box info-amber">Failed to create code for ${escapeHtml(members[0].studentName)}: ${escapeHtml(codeErr.message)}</div>`; continue; }
+
+    for (const m of members) {
+      await db.from('dance_studio_students').insert({
+        id: code + '-' + Math.random().toString(36).slice(2, 8),
+        access_code_id: code, event_id: CURRENT_EVENT_ID,
+        student_name: m.studentName, parent_email: m.parentEmail || null,
+        parent_phone: m.parentPhone || null, address: m.address || null,
+        created_at: new Date().toISOString(),
+      });
+    }
+    created++;
+
+    // Email the code — goes through the NEW api/dance-studio.js endpoint
+    // (send_code_email action), not api/send.js, since that endpoint's
+    // shape is built around ticket delivery specifically (requires a
+    // ticketId/seat that doesn't exist yet at this point) — see header
+    // comment. This call will fail until that endpoint is deployed；
+    // failures are caught and marked here rather than left silent, same
+    // posture as the Students tab's delivery-status tracking.
+    try {
+      const resp = await fetch(`${VERCEL_API}/api/dance-studio`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'send_code_email', email: primaryContact.parentEmail,
+          studentNames: members.map(m => m.studentName), code,
+          eventName: CURRENT_EVENT_NAME, compCount,
+        }),
+      });
+      const ok = resp.ok;
+      await db.from('access_codes').update({ email_status: ok ? 'sent' : 'failed' }).eq('id', code);
+      if (!ok) emailFailed++;
+    } catch (e) {
+      await db.from('access_codes').update({ email_status: 'failed' }).eq('id', code);
+      emailFailed++;
+    }
+  }
+
+  btn.disabled = false; btn.textContent = 'Confirm & Generate Codes →';
+  statusEl.innerHTML = `<div class="info-box ${emailFailed ? 'info-amber' : 'info-ok'}">✓ Created ${created} code(s).${emailFailed ? ` ${emailFailed} email(s) failed to send — resend from the Students tab once api/dance-studio.js is deployed.` : ''}</div>`;
+  document.getElementById('preview-area').style.display = 'none';
+  document.getElementById('csv-file').value = '';
+}
+
+function generateCode() {
+  // Excludes 0/O/1/I/L — ambiguous when read aloud over the phone or typed by a parent.
+  const alphabet = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+  let s = '';
+  for (let i = 0; i < 6; i++) s += alphabet[Math.floor(Math.random() * alphabet.length)];
+  return 'DSA-' + s;
+}
+
+// ── STUDENTS TAB ─────────────────────────────────────────────────────
+async function loadStudents() {
+  if (!CURRENT_EVENT_ID) return;
+  const { data: codes } = await db.from('access_codes').select('*').eq('event_id', CURRENT_EVENT_ID).order('created_at', { ascending: false });
+  const { data: students } = await db.from('dance_studio_students').select('*').eq('event_id', CURRENT_EVENT_ID);
+  STUDENTS_CACHE = (codes || []).map(code => ({
+    ...code,
+    students: (students || []).filter(s => s.access_code_id === code.id),
+  }));
+  renderStudents();
+}
+
+function renderStudents() {
+  const q = (document.getElementById('students-search')?.value || '').toLowerCase();
+  const filtered = STUDENTS_CACHE.filter(c => {
+    if (!q) return true;
+    const hay = [c.code, ...c.students.map(s => s.student_name), ...c.students.map(s => s.parent_email), ...c.students.map(s => s.parent_phone)].join(' ').toLowerCase();
+    return hay.includes(q);
+  });
+  document.getElementById('students-summary').textContent = `${filtered.length} code(s) · ${filtered.filter(c => c.status === 'used').length} redeemed · ${filtered.filter(c => c.email_status === 'failed').length} email failures`;
+  document.getElementById('students-list').innerHTML = filtered.map(c => {
+    const names = c.students.map(s => s.student_name).join(', ') || '—';
+    const contact = c.students[0]?.parent_email || c.students[0]?.parent_phone || '—';
+    const statusPill = c.status === 'used' ? `<span class="pill pill-ok">Used</span>` : `<span class="pill pill-gray">Unused</span>`;
+    const emailPill = c.email_status === 'sent' ? `<span class="pill pill-ok">Sent</span>` : c.email_status === 'failed' ? `<span class="pill pill-red">Failed</span>` : `<span class="pill pill-amber">Pending</span>`;
+    return `<div class="stu-row">
+      <div class="stu-names">${escapeHtml(names)}</div>
+      <div>${escapeHtml(contact)}</div>
+      <div class="mono">${escapeHtml(c.code)}</div>
+      <div>${statusPill}</div>
+      <div class="stu-sub">${c.used_at ? new Date(c.used_at).toLocaleString() : '—'}</div>
+      <div>${emailPill}</div>
+      <div><button class="btn btn-ghost btn-sm" onclick="resendCode('${c.id}')">Resend</button></div>
+    </div>`;
+  }).join('') || `<div class="empty">No codes generated yet — use Upload &amp; Preview.</div>`;
+}
+
+async function resendCode(codeId) {
+  const c = STUDENTS_CACHE.find(x => x.id === codeId);
+  if (!c) return;
+  const primary = c.students[0];
+  try {
+    const resp = await fetch(`${VERCEL_API}/api/dance-studio`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'send_code_email', email: primary?.parent_email, studentNames: c.students.map(s => s.student_name),
+        code: c.code, eventName: CURRENT_EVENT_NAME, compCount: c.comp_count,
+      }),
+    });
+    await db.from('access_codes').update({ email_status: resp.ok ? 'sent' : 'failed' }).eq('id', codeId);
+  } catch (e) {
+    await db.from('access_codes').update({ email_status: 'failed' }).eq('id', codeId);
+  }
+  loadStudents();
+}
+
+async function bulkResendFailed() {
+  const failed = STUDENTS_CACHE.filter(c => c.email_status === 'failed');
+  for (const c of failed) await resendCode(c.id);
+}
+
+// ── UTIL ─────────────────────────────────────────────────────────────
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
+}
+</script>
+</body>
+</html>
