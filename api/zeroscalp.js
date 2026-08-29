@@ -12,18 +12,42 @@
 //   'deny_exception'              → venue/platform denial
 //   'release_approved_exceptions' → 30-min pre-doors delivery
 //
-// FIX (this revision): release_approved_exceptions previously spread
+// FIX (previous revision): release_approved_exceptions previously spread
 // ...origTicket into the new recipient ticket, which carried over the
 // ORIGINAL tx_hash unchanged. claim.js groups "sibling" tickets by tx_hash
 // to support multi-seat purchases — so the recipient's claim link would
 // also surface every other ticket (and PII) from the original buyer's same
 // checkout session. Fixed by giving the new ticket its own unique tx_hash.
+//
+// FIX (this revision): the `tickets` table has no `updated_at` column
+// (confirmed directly against the live schema — `exception_requests` and
+// `platform_exception_requests` both have it, `tickets` never has). Three
+// separate `.update()` calls against `tickets` in this file included
+// `updated_at: now` anyway, so every one of them failed outright:
+//   - approve_exception: failed to set transfer_pending → every approval
+//     aborted with "Failed to lock original ticket", confirmed live.
+//   - deny_exception: failed to restore status to 'valid' — but this call
+//     site never checked the error, so it silently logged a false success
+//     ("ticket restored to valid") while marking the request 'denied'.
+//     Net effect: a denied request left the buyer's ticket permanently
+//     stuck in transfer_pending — unusable at the door — with no error
+//     surfaced anywhere.
+//   - release_approved_exceptions: failed to mark the original ticket
+//     'transferred' after creating the recipient's new ticket. Currently
+//     unreachable in practice (nothing has been reaching 'approved'
+//     status), but would have reopened the exact "two valid tickets"
+//     loophole this system exists to prevent, the moment approval started
+//     working again.
+// Fixed by dropping `updated_at` from all three `tickets` updates (that
+// column was never real, so there's nothing to restore) and adding error
+// checks to the two call sites that previously had none, so a future
+// failure here fails loudly instead of silently.
 // ============================================================
 
 const { createClient } = require('@supabase/supabase-js');
-const { Resend }       = require('resend');
-const crypto           = require('crypto');
-const { v4: uuidv4 }   = require('uuid');
+const { Resend } = require('resend');
+const crypto = require('crypto');
+const { v4: uuidv4 } = require('uuid');
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -31,14 +55,14 @@ const supabase = createClient(
 );
 
 const CORS = {
-  'Access-Control-Allow-Origin':  '*',
+  'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type',
 };
 
-const VENUE_ADMIN_EMAIL    = process.env.VENUE_ADMIN_EMAIL    || 'admin@octicketslive.com';
+const VENUE_ADMIN_EMAIL = process.env.VENUE_ADMIN_EMAIL || 'admin@octicketslive.com';
 const PLATFORM_ADMIN_EMAIL = process.env.PLATFORM_ADMIN_EMAIL || 'joe@ten2022.com';
-const FROM_EMAIL           = 'OC Tickets Live <tickets@octicketslive.com>';
+const FROM_EMAIL = 'OC Tickets Live <tickets@octicketslive.com>';
 
 // ── Helpers ────────────────────────────────────────────────
 function hashOtp(otp) {
@@ -98,13 +122,13 @@ function baseTemplate(content) {
 <table width="100%" cellpadding="0" cellspacing="0" style="background:#0a0900;padding:24px 16px">
 <tr><td align="center">
 <table width="560" cellpadding="0" cellspacing="0" style="max-width:560px;width:100%">
-  <tr><td style="background:#0e0c08;border:1px solid #2a2310;border-radius:8px;padding:28px 28px 24px">
-    <div style="font-size:10px;font-weight:700;letter-spacing:3px;color:#C9A84C;text-transform:uppercase;font-family:monospace;margin-bottom:18px">⚡ OC Tickets Live · ZeroScalp</div>
-    ${content}
-    <div style="margin-top:24px;padding-top:16px;border-top:1px solid #1e1c14;font-size:10px;color:#4a4530;font-family:monospace;line-height:1.8">
-      OC Tickets Live · octicketslive.com<br>This is an automated ZeroScalp governance notification.
-    </div>
-  </td></tr>
+<tr><td style="background:#0e0c08;border:1px solid #2a2310;border-radius:8px;padding:28px 28px 24px">
+<div style="font-size:10px;font-weight:700;letter-spacing:3px;color:#C9A84C;text-transform:uppercase;font-family:monospace;margin-bottom:18px">⚡ OC Tickets Live · ZeroScalp</div>
+${content}
+<div style="margin-top:24px;padding-top:16px;border-top:1px solid #1e1c14;font-size:10px;color:#4a4530;font-family:monospace;line-height:1.8">
+OC Tickets Live · octicketslive.com<br>This is an automated ZeroScalp governance notification.
+</div>
+</td></tr>
 </table>
 </td></tr></table>
 </body></html>`;
@@ -112,140 +136,140 @@ function baseTemplate(content) {
 
 function row(label, value) {
   return `<div style="display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid #1e1c14;font-size:12px">
-    <span style="color:#8a7f5c;font-family:monospace">${label}</span>
-    <span style="color:#f5f0e6;font-weight:600;text-align:right;max-width:60%">${value}</span>
-  </div>`;
+<span style="color:#8a7f5c;font-family:monospace">${label}</span>
+<span style="color:#f5f0e6;font-weight:600;text-align:right;max-width:60%">${value}</span>
+</div>`;
 }
 
 // Notification 1 — Exception request received (to venue admin + platform admin)
 function tplExceptionReceived({ excReq, eventName, seat, ticketId }) {
   return baseTemplate(`
-    <div style="font-size:17px;font-weight:700;color:#f5f0e6;margin-bottom:6px">New Exception Transfer Request</div>
-    <div style="font-size:12px;color:#8a7f5c;margin-bottom:20px">A buyer has submitted an exception transfer request for a non-transferable event.</div>
-    ${row('Event', eventName || excReq.event_id)}
-    ${row('Seat / Ticket', seat ? `${seat} · ${ticketId}` : ticketId)}
-    ${row('Requestor Phone', maskPhone(excReq.requestor_phone))}
-    ${row('Requestor Email', excReq.requestor_email || '—')}
-    ${row('Recipient', excReq.recipient_name ? `${excReq.recipient_name} · ${excReq.recipient_phone}` : excReq.recipient_phone || '—')}
-    ${row('Reason', excReq.reason || 'Not provided')}
-    ${row('Approval Tier', excReq.approval_tier === 'platform' ? '⚠ Platform (OC Tickets Live) approval required' : 'Venue Admin')}
-    ${row('Request ID', excReq.id)}
-    <div style="margin-top:18px;font-size:11px;color:#8a7f5c;font-family:monospace">
-      Log in to Venue OS → ⚡ Exceptions to review and approve or deny this request.
-    </div>`);
+<div style="font-size:17px;font-weight:700;color:#f5f0e6;margin-bottom:6px">New Exception Transfer Request</div>
+<div style="font-size:12px;color:#8a7f5c;margin-bottom:20px">A buyer has submitted an exception transfer request for a non-transferable event.</div>
+${row('Event', eventName || excReq.event_id)}
+${row('Seat / Ticket', seat ? `${seat} · ${ticketId}` : ticketId)}
+${row('Requestor Phone', maskPhone(excReq.requestor_phone))}
+${row('Requestor Email', excReq.requestor_email || '—')}
+${row('Recipient', excReq.recipient_name ? `${excReq.recipient_name} · ${excReq.recipient_phone}` : excReq.recipient_phone || '—')}
+${row('Reason', excReq.reason || 'Not provided')}
+${row('Approval Tier', excReq.approval_tier === 'platform' ? '⚠ Platform (OC Tickets Live) approval required' : 'Venue Admin')}
+${row('Request ID', excReq.id)}
+<div style="margin-top:18px;font-size:11px;color:#8a7f5c;font-family:monospace">
+Log in to Venue OS → ⚡ Exceptions to review and approve or deny this request.
+</div>`);
 }
 
 // Notification 2 — Approved (to requestor)
 function tplExceptionApproved({ excReq, eventName, seat }) {
   return baseTemplate(`
-    <div style="font-size:17px;font-weight:700;color:#1d9e75;margin-bottom:6px">✓ Exception Transfer Approved</div>
-    <div style="font-size:12px;color:#8a7f5c;margin-bottom:20px">Your exception transfer request has been approved.</div>
-    ${row('Event', eventName || excReq.event_id)}
-    ${row('Seat', seat || '—')}
-    ${row('Transferring to', excReq.recipient_name ? `${excReq.recipient_name} (${excReq.recipient_email || excReq.recipient_phone})` : excReq.recipient_phone)}
-    ${row('Request ID', excReq.id)}
-    <div style="margin-top:18px;background:#13110a;border:1px solid #2a2310;border-radius:4px;padding:14px">
-      <div style="font-size:12px;color:#C9A84C;font-weight:700;margin-bottom:6px">⚡ ZeroScalp Transfer Hold</div>
-      <div style="font-size:11px;color:#8a7f5c;line-height:1.7">
-        Your ticket has been placed on <strong style="color:#f5f0e6">transfer hold</strong> and
-        <strong style="color:#c0392b">cannot be used for entry</strong> until the transfer is complete.
-        The recipient will receive their ticket <strong style="color:#f5f0e6">30 minutes before doors open</strong>,
-        at which point your original ticket will be permanently invalidated.
-        If this request is cancelled before delivery, your ticket will be restored to valid status.
-      </div>
-    </div>`);
+<div style="font-size:17px;font-weight:700;color:#1d9e75;margin-bottom:6px">✓ Exception Transfer Approved</div>
+<div style="font-size:12px;color:#8a7f5c;margin-bottom:20px">Your exception transfer request has been approved.</div>
+${row('Event', eventName || excReq.event_id)}
+${row('Seat', seat || '—')}
+${row('Transferring to', excReq.recipient_name ? `${excReq.recipient_name} (${excReq.recipient_email || excReq.recipient_phone})` : excReq.recipient_phone)}
+${row('Request ID', excReq.id)}
+<div style="margin-top:18px;background:#13110a;border:1px solid #2a2310;border-radius:4px;padding:14px">
+<div style="font-size:12px;color:#C9A84C;font-weight:700;margin-bottom:6px">⚡ ZeroScalp Transfer Hold</div>
+<div style="font-size:11px;color:#8a7f5c;line-height:1.7">
+Your ticket has been placed on <strong style="color:#f5f0e6">transfer hold</strong> and
+<strong style="color:#c0392b">cannot be used for entry</strong> until the transfer is complete.
+The recipient will receive their ticket <strong style="color:#f5f0e6">30 minutes before doors open</strong>,
+at which point your original ticket will be permanently invalidated.
+If this request is cancelled before delivery, your ticket will be restored to valid status.
+</div>
+</div>`);
 }
 
 // Notification 3 — Denied (to requestor)
 function tplExceptionDenied({ excReq, eventName, seat, reviewerNotes }) {
   return baseTemplate(`
-    <div style="font-size:17px;font-weight:700;color:#c0392b;margin-bottom:6px">Exception Transfer Request — Not Approved</div>
-    <div style="font-size:12px;color:#8a7f5c;margin-bottom:20px">Your exception transfer request could not be approved at this time.</div>
-    ${row('Event', eventName || excReq.event_id)}
-    ${row('Seat', seat || '—')}
-    ${row('Request ID', excReq.id)}
-    ${reviewerNotes ? row('Notes', reviewerNotes) : ''}
-    <div style="margin-top:18px;font-size:11px;color:#8a7f5c;font-family:monospace;line-height:1.7">
-      Your original ticket has been restored to valid status and is fully usable for entry.
-      If you believe this decision was made in error, please contact the venue directly.
-    </div>`);
+<div style="font-size:17px;font-weight:700;color:#c0392b;margin-bottom:6px">Exception Transfer Request — Not Approved</div>
+<div style="font-size:12px;color:#8a7f5c;margin-bottom:20px">Your exception transfer request could not be approved at this time.</div>
+${row('Event', eventName || excReq.event_id)}
+${row('Seat', seat || '—')}
+${row('Request ID', excReq.id)}
+${reviewerNotes ? row('Notes', reviewerNotes) : ''}
+<div style="margin-top:18px;font-size:11px;color:#8a7f5c;font-family:monospace;line-height:1.7">
+Your original ticket has been restored to valid status and is fully usable for entry.
+If you believe this decision was made in error, please contact the venue directly.
+</div>`);
 }
 
 // Notification 4a — Ticket delivered to recipient
 function tplTicketDelivered({ excReq, eventName, seat, claimUrl }) {
   return baseTemplate(`
-    <div style="font-size:17px;font-weight:700;color:#f5f0e6;margin-bottom:6px">Your Ticket Has Arrived</div>
-    <div style="font-size:12px;color:#8a7f5c;margin-bottom:20px">A ticket has been transferred to you via ZeroScalp exception transfer.</div>
-    ${row('Event', eventName || excReq.event_id)}
-    ${row('Seat', seat || '—')}
-    ${row('From', maskPhone(excReq.requestor_phone))}
-    <div style="margin-top:18px;text-align:center">
-      <a href="${claimUrl}" style="display:inline-block;background:#C9A84C;color:#000;text-decoration:none;font-weight:700;font-size:13px;letter-spacing:1px;padding:12px 32px;border-radius:4px;text-transform:uppercase">
-        Access My Ticket →
-      </a>
-    </div>
-    <div style="margin-top:14px;font-size:11px;color:#4a4530;font-family:monospace;text-align:center;word-break:break-all">${claimUrl}</div>
-    <div style="margin-top:12px;font-size:10px;color:#4a4530;font-family:monospace;line-height:1.7">
-      🔒 This ticket includes a rotating QR code. Do not share this link. Screenshots are not valid at the door.
-    </div>`);
+<div style="font-size:17px;font-weight:700;color:#f5f0e6;margin-bottom:6px">Your Ticket Has Arrived</div>
+<div style="font-size:12px;color:#8a7f5c;margin-bottom:20px">A ticket has been transferred to you via ZeroScalp exception transfer.</div>
+${row('Event', eventName || excReq.event_id)}
+${row('Seat', seat || '—')}
+${row('From', maskPhone(excReq.requestor_phone))}
+<div style="margin-top:18px;text-align:center">
+<a href="${claimUrl}" style="display:inline-block;background:#C9A84C;color:#000;text-decoration:none;font-weight:700;font-size:13px;letter-spacing:1px;padding:12px 32px;border-radius:4px;text-transform:uppercase">
+Access My Ticket →
+</a>
+</div>
+<div style="margin-top:14px;font-size:11px;color:#4a4530;font-family:monospace;text-align:center;word-break:break-all">${claimUrl}</div>
+<div style="margin-top:12px;font-size:10px;color:#4a4530;font-family:monospace;line-height:1.7">
+🔒 This ticket includes a rotating QR code. Do not share this link. Screenshots are not valid at the door.
+</div>`);
 }
 
 // Notification 4b — Transfer complete confirmation to requestor
 function tplTransferComplete({ excReq, eventName, seat }) {
   return baseTemplate(`
-    <div style="font-size:17px;font-weight:700;color:#1d9e75;margin-bottom:6px">✓ Transfer Complete</div>
-    <div style="font-size:12px;color:#8a7f5c;margin-bottom:20px">Your exception transfer has been executed.</div>
-    ${row('Event', eventName || excReq.event_id)}
-    ${row('Seat', seat || '—')}
-    ${row('Transferred to', excReq.recipient_name || excReq.recipient_phone)}
-    ${row('Request ID', excReq.id)}
-    <div style="margin-top:18px;font-size:11px;color:#8a7f5c;font-family:monospace">
-      Your original ticket has been permanently invalidated. The recipient has been sent their ticket claim link.
-      This completes your exception transfer request.
-    </div>`);
+<div style="font-size:17px;font-weight:700;color:#1d9e75;margin-bottom:6px">✓ Transfer Complete</div>
+<div style="font-size:12px;color:#8a7f5c;margin-bottom:20px">Your exception transfer has been executed.</div>
+${row('Event', eventName || excReq.event_id)}
+${row('Seat', seat || '—')}
+${row('Transferred to', excReq.recipient_name || excReq.recipient_phone)}
+${row('Request ID', excReq.id)}
+<div style="margin-top:18px;font-size:11px;color:#8a7f5c;font-family:monospace">
+Your original ticket has been permanently invalidated. The recipient has been sent their ticket claim link.
+This completes your exception transfer request.
+</div>`);
 }
 
 // Notification 5 — Account flagged (platform admin only, internal)
 function tplAccountFlagged({ phone, rollingCount, eventId }) {
   return baseTemplate(`
-    <div style="font-size:17px;font-weight:700;color:#C9A84C;margin-bottom:6px">⚠ ZeroScalp Flag — Account Threshold Reached</div>
-    <div style="font-size:12px;color:#8a7f5c;margin-bottom:20px">A phone number has reached the exception request flag threshold (3 requests in 6 months).</div>
-    ${row('Phone (masked)', maskPhone(phone))}
-    ${row('Rolling 6-month count', String(rollingCount))}
-    ${row('Event (current request)', eventId)}
-    <div style="margin-top:18px;font-size:11px;color:#8a7f5c;font-family:monospace;line-height:1.7">
-      This request is proceeding normally. Full cross-venue history has been surfaced to approvers.
-      One more request from this number will trigger automatic denial.
-    </div>`);
+<div style="font-size:17px;font-weight:700;color:#C9A84C;margin-bottom:6px">⚠ ZeroScalp Flag — Account Threshold Reached</div>
+<div style="font-size:12px;color:#8a7f5c;margin-bottom:20px">A phone number has reached the exception request flag threshold (3 requests in 6 months).</div>
+${row('Phone (masked)', maskPhone(phone))}
+${row('Rolling 6-month count', String(rollingCount))}
+${row('Event (current request)', eventId)}
+<div style="margin-top:18px;font-size:11px;color:#8a7f5c;font-family:monospace;line-height:1.7">
+This request is proceeding normally. Full cross-venue history has been surfaced to approvers.
+One more request from this number will trigger automatic denial.
+</div>`);
 }
 
 // Notification 6 — Auto-denied (to requestor + platform admin)
 function tplAutoDenied({ phone, eventName }) {
   return baseTemplate(`
-    <div style="font-size:17px;font-weight:700;color:#c0392b;margin-bottom:6px">Exception Transfer Request — Unable to Process</div>
-    <div style="font-size:12px;color:#8a7f5c;margin-bottom:20px">We were unable to process your exception transfer request at this time.</div>
-    ${row('Event', eventName || '—')}
-    <div style="margin-top:18px;font-size:11px;color:#8a7f5c;font-family:monospace;line-height:1.7">
-      Your original ticket remains valid and unaffected. If you need assistance, please contact the venue directly.
-    </div>`);
+<div style="font-size:17px;font-weight:700;color:#c0392b;margin-bottom:6px">Exception Transfer Request — Unable to Process</div>
+<div style="font-size:12px;color:#8a7f5c;margin-bottom:20px">We were unable to process your exception transfer request at this time.</div>
+${row('Event', eventName || '—')}
+<div style="margin-top:18px;font-size:11px;color:#8a7f5c;font-family:monospace;line-height:1.7">
+Your original ticket remains valid and unaffected. If you need assistance, please contact the venue directly.
+</div>`);
 }
 
 function tplAutoDeniedAdmin({ phone, rollingCount, eventId }) {
   return baseTemplate(`
-    <div style="font-size:17px;font-weight:700;color:#c0392b;margin-bottom:6px">⛔ ZeroScalp Auto-Denial — Audit Record</div>
-    <div style="font-size:12px;color:#8a7f5c;margin-bottom:20px">An exception transfer request was automatically denied — request limit exceeded.</div>
-    ${row('Phone (masked)', maskPhone(phone))}
-    ${row('Rolling 6-month count', String(rollingCount))}
-    ${row('Event', eventId)}
-    <div style="margin-top:18px;font-size:11px;color:#8a7f5c;font-family:monospace">
-      Audit record written to platform_exception_requests. No further action required unless manual review is warranted.
-    </div>`);
+<div style="font-size:17px;font-weight:700;color:#c0392b;margin-bottom:6px">⛔ ZeroScalp Auto-Denial — Audit Record</div>
+<div style="font-size:12px;color:#8a7f5c;margin-bottom:20px">An exception transfer request was automatically denied — request limit exceeded.</div>
+${row('Phone (masked)', maskPhone(phone))}
+${row('Rolling 6-month count', String(rollingCount))}
+${row('Event', eventId)}
+<div style="margin-top:18px;font-size:11px;color:#8a7f5c;font-family:monospace">
+Audit record written to platform_exception_requests. No further action required unless manual review is warranted.
+</div>`);
 }
 
 module.exports = async function handler(req, res) {
   Object.entries(CORS).forEach(([k, v]) => res.setHeader(k, v));
   if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method !== 'POST')   return res.status(405).json({ error: 'Method not allowed' });
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   const { action } = req.body || {};
   if (!action) return res.status(400).json({ error: 'action required' });
@@ -265,9 +289,9 @@ module.exports = async function handler(req, res) {
       const { data: config } = await supabase.from('event_config').select('resale_rule, transfer_enabled').eq('event_id', ticket.event_id).maybeSingle();
       const resaleRule = config?.resale_rule ?? 'open';
       if (resaleRule === 'original_plus_fees') {
-        const originalPrice = parseFloat(ticket.price)      || 0;
-        const stripeFee     = parseFloat(ticket.stripe_fee) || parseFloat(((originalPrice * 0.029) + 0.30).toFixed(2));
-        const maxPrice      = parseFloat((originalPrice + stripeFee).toFixed(2));
+        const originalPrice = parseFloat(ticket.price) || 0;
+        const stripeFee = parseFloat(ticket.stripe_fee) || parseFloat(((originalPrice * 0.029) + 0.30).toFixed(2));
+        const maxPrice = parseFloat((originalPrice + stripeFee).toFixed(2));
         if (askedNum > maxPrice) {
           return res.status(400).json({ allowed: false, max_price: maxPrice, original: originalPrice, stripe_fee: stripeFee, resale_rule: resaleRule, reason: `Resale price capped at original price + Stripe fee ($${maxPrice.toFixed(2)})` });
         }
@@ -288,10 +312,10 @@ module.exports = async function handler(req, res) {
       if (ticket.status !== 'valid') return res.status(200).json({ eligible: false, reason: `Ticket status is '${ticket.status}' — only valid tickets can be transferred` });
       const { data: config } = await supabase.from('event_config').select('transfer_enabled, resale_rule, price_cap_bps, doors_open').eq('event_id', ticket.event_id).maybeSingle();
       const transferEnabled = config?.transfer_enabled ?? true;
-      const resaleRule      = config?.resale_rule      ?? 'open';
-      const originalPrice   = parseFloat(ticket.price)      || 0;
-      const stripeFee       = parseFloat(ticket.stripe_fee) || parseFloat(((originalPrice * 0.029) + 0.30).toFixed(2));
-      const maxPrice        = resaleRule === 'original_plus_fees' ? parseFloat((originalPrice + stripeFee).toFixed(2)) : null;
+      const resaleRule = config?.resale_rule ?? 'open';
+      const originalPrice = parseFloat(ticket.price) || 0;
+      const stripeFee = parseFloat(ticket.stripe_fee) || parseFloat(((originalPrice * 0.029) + 0.30).toFixed(2));
+      const maxPrice = resaleRule === 'original_plus_fees' ? parseFloat((originalPrice + stripeFee).toFixed(2)) : null;
       if (!transferEnabled) {
         return res.status(200).json({
           eligible: false, transfer_enabled: false,
@@ -346,16 +370,16 @@ module.exports = async function handler(req, res) {
       }
 
       const approvalTier = rollingCount >= 1 ? 'platform' : 'venue_admin';
-      const flagged      = rollingCount >= 3;
+      const flagged = rollingCount >= 3;
 
       if (flagged) {
         sendNotificationEmail({ to: PLATFORM_ADMIN_EMAIL, subject: `⚠ ZeroScalp Flag — ${maskPhone(requestorNorm)}`, html: tplAccountFlagged({ phone: requestorNorm, rollingCount, eventId: ticket.event_id }) });
       }
 
-      const otp        = generateOtp();
-      const otpHash    = hashOtp(otp);
+      const otp = generateOtp();
+      const otpHash = hashOtp(otp);
       const otpExpires = new Date(Date.now() + 10 * 60 * 1000).toISOString();
-      const requestId  = 'exc-' + Date.now() + '-' + Math.random().toString(36).slice(2,6);
+      const requestId = 'exc-' + Date.now() + '-' + Math.random().toString(36).slice(2,6);
 
       const { error: insertErr } = await supabase.from('exception_requests').insert({
         id: requestId, ticket_id, event_id: ticket.event_id,
@@ -373,7 +397,7 @@ module.exports = async function handler(req, res) {
           const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
           await client.messages.create({
             from: process.env.TWILIO_PHONE_NUMBER,
-            to:   '+1' + requestorNorm,
+            to: '+1' + requestorNorm,
             body: `Your OC Tickets Live exception transfer code: ${otp}\n\nValid for 10 minutes. Do not share this code.`,
           });
           otpSent = true;
@@ -403,7 +427,7 @@ module.exports = async function handler(req, res) {
 
     try {
       const { data: excReq } = await supabase.from('exception_requests').select('*').eq('id', request_id).maybeSingle();
-      if (!excReq)          return res.status(404).json({ error: 'Exception request not found' });
+      if (!excReq) return res.status(404).json({ error: 'Exception request not found' });
       if (excReq.otp_verified) return res.status(400).json({ error: 'OTP already verified' });
       if (!excReq.otp_hash || !excReq.otp_expires_at) return res.status(400).json({ error: 'No OTP on record — start over' });
       if (new Date(excReq.otp_expires_at) < new Date()) return res.status(400).json({ error: 'OTP expired — start over' });
@@ -437,7 +461,7 @@ module.exports = async function handler(req, res) {
 
     try {
       const { data: excReq } = await supabase.from('exception_requests').select('*').eq('id', request_id).maybeSingle();
-      if (!excReq)              return res.status(404).json({ error: 'Exception request not found' });
+      if (!excReq) return res.status(404).json({ error: 'Exception request not found' });
       if (!excReq.otp_verified) return res.status(400).json({ error: 'OTP not verified — cannot approve' });
       if (excReq.status !== 'pending') return res.status(400).json({ error: `Request already ${excReq.status}` });
 
@@ -445,7 +469,7 @@ module.exports = async function handler(req, res) {
 
       const { error: ticketUpdateErr } = await supabase
         .from('tickets')
-        .update({ status: 'transfer_pending', updated_at: now })
+        .update({ status: 'transfer_pending' })
         .eq('id', excReq.ticket_id);
 
       if (ticketUpdateErr) {
@@ -465,19 +489,19 @@ module.exports = async function handler(req, res) {
 
       const { data: ticket } = await supabase.from('tickets').select('seat, event_name').eq('id', excReq.ticket_id).maybeSingle();
       const eventName = ticket?.event_name || excReq.event_id;
-      const seat      = ticket?.seat || '—';
+      const seat = ticket?.seat || '—';
 
       if (excReq.requestor_email) {
         sendNotificationEmail({
-          to:      excReq.requestor_email,
+          to: excReq.requestor_email,
           subject: `✓ Exception Transfer Approved — ${eventName}`,
-          html:    tplExceptionApproved({ excReq, eventName, seat }),
+          html: tplExceptionApproved({ excReq, eventName, seat }),
         });
       }
       sendNotificationEmail({
-        to:      PLATFORM_ADMIN_EMAIL,
+        to: PLATFORM_ADMIN_EMAIL,
         subject: `[Platform] Exception Approved — ${request_id}`,
-        html:    tplExceptionApproved({ excReq, eventName, seat }),
+        html: tplExceptionApproved({ excReq, eventName, seat }),
       });
 
       console.log(`zeroscalp/approve_exception: ✓ approved ${request_id} — ticket ${excReq.ticket_id} set to transfer_pending`);
@@ -509,9 +533,13 @@ module.exports = async function handler(req, res) {
 
       const { data: ticket } = await supabase.from('tickets').select('status, seat, event_name').eq('id', excReq.ticket_id).maybeSingle();
       if (ticket?.status === 'transfer_pending') {
-        await supabase.from('tickets')
-          .update({ status: 'valid', updated_at: now })
+        const { error: restoreErr } = await supabase.from('tickets')
+          .update({ status: 'valid' })
           .eq('id', excReq.ticket_id);
+        if (restoreErr) {
+          console.error('zeroscalp/deny_exception: failed to restore ticket to valid:', restoreErr.message);
+          return res.status(500).json({ error: 'Failed to restore original ticket — denial aborted', detail: restoreErr.message });
+        }
         console.log(`zeroscalp/deny_exception: ticket ${excReq.ticket_id} restored to valid`);
       }
 
@@ -525,13 +553,13 @@ module.exports = async function handler(req, res) {
         .then(() => {}, e => console.error('Platform deny sync error:', e.message));
 
       const eventName = ticket?.event_name || excReq.event_id;
-      const seat      = ticket?.seat || '—';
+      const seat = ticket?.seat || '—';
 
       if (excReq.requestor_email) {
         sendNotificationEmail({
-          to:      excReq.requestor_email,
+          to: excReq.requestor_email,
           subject: `Exception Transfer Request — Not Approved`,
-          html:    tplExceptionDenied({ excReq, eventName, seat, reviewerNotes: reviewer_notes || null }),
+          html: tplExceptionDenied({ excReq, eventName, seat, reviewerNotes: reviewer_notes || null }),
         });
       }
 
@@ -567,7 +595,7 @@ module.exports = async function handler(req, res) {
             continue;
           }
 
-          const doorsOpen     = new Date(config.doors_open);
+          const doorsOpen = new Date(config.doors_open);
           const releaseWindow = new Date(doorsOpen.getTime() - 30 * 60 * 1000);
 
           if (now < releaseWindow) {
@@ -601,18 +629,18 @@ module.exports = async function handler(req, res) {
           // this exception-transfer recipient. The new ID itself already
           // makes the QR cryptographically distinct; tx_hash needs to match.
           const newTicketId = origTicket.id.replace(/^CADB-/, 'CADB-X-');
-          const newTxHash   = 'exception:' + newTicketId;
+          const newTxHash = 'exception:' + newTicketId;
           const { error: newTicketErr } = await supabase.from('tickets').insert({
             ...origTicket,
-            id:           newTicketId,
-            tx_hash:      newTxHash,
-            buyer_email:  excReq.recipient_email || null,
-            buyer_name:   excReq.recipient_name  || null,
-            buyer_phone:  excReq.recipient_phone  || null,
-            status:       'valid',
-            payment:      'exception_transfer',
+            id: newTicketId,
+            tx_hash: newTxHash,
+            buyer_email: excReq.recipient_email || null,
+            buyer_name: excReq.recipient_name || null,
+            buyer_phone: excReq.recipient_phone || null,
+            status: 'valid',
+            payment: 'exception_transfer',
             purchased_at: now.toISOString(),
-            updated_at:   now.toISOString(),
+            updated_at: now.toISOString(),
           });
 
           if (newTicketErr) {
@@ -621,25 +649,35 @@ module.exports = async function handler(req, res) {
             continue;
           }
 
-          await supabase.from('tickets').update({
-            status:     'transferred',
-            updated_at: now.toISOString(),
+          const { error: origUpdateErr } = await supabase.from('tickets').update({
+            status: 'transferred',
           }).eq('id', excReq.ticket_id);
+          if (origUpdateErr) {
+            // The recipient's new ticket already exists at this point — do
+            // NOT skip silently. Failing to flip the original to
+            // 'transferred' here means both tickets are usable at once,
+            // exactly the "two valid tickets" loophole this whole system
+            // exists to prevent. Log loudly and record it as an error in
+            // the results rather than treating this release as successful.
+            console.error(`zeroscalp/release: CRITICAL — failed to invalidate original ticket ${excReq.ticket_id} after recipient ticket ${newTicketId} was created:`, origUpdateErr.message);
+            results.push({ id: excReq.id, error: 'Recipient ticket created but original was NOT invalidated — manual review required: ' + origUpdateErr.message, new_ticket_id: newTicketId });
+            continue;
+          }
 
-          const token     = uuidv4();
+          const token = uuidv4();
           const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
-          const baseUrl   = process.env.VENUE_BASE_URL || 'https://theetestsite.eth.limo';
+          const baseUrl = process.env.VENUE_BASE_URL || 'https://theetestsite.eth.limo';
           await supabase.from('claim_tokens').insert({
             token,
-            ticket_id:  newTicketId,
-            phone:      excReq.recipient_phone || null,
+            ticket_id: newTicketId,
+            phone: excReq.recipient_phone || null,
             expires_at: expiresAt,
-            claimed:    false,
+            claimed: false,
           }).then(() => {}, e => console.error('Claim token error:', e.message));
           const claimUrl = `${baseUrl}/#claim=${token}`;
 
           const eventName = origTicket.event_name || excReq.event_id;
-          const seat      = origTicket.seat || '—';
+          const seat = origTicket.seat || '—';
 
           await supabase.from('exception_requests').update({
             delivery_status: 'delivered', updated_at: now.toISOString(),
@@ -650,17 +688,17 @@ module.exports = async function handler(req, res) {
 
           if (excReq.recipient_email) {
             sendNotificationEmail({
-              to:      excReq.recipient_email,
+              to: excReq.recipient_email,
               subject: `Your Ticket Has Arrived — ${eventName}`,
-              html:    tplTicketDelivered({ excReq, eventName, seat, claimUrl }),
+              html: tplTicketDelivered({ excReq, eventName, seat, claimUrl }),
             });
           }
 
           if (excReq.requestor_email) {
             sendNotificationEmail({
-              to:      excReq.requestor_email,
+              to: excReq.requestor_email,
               subject: `✓ Transfer Complete — ${eventName}`,
-              html:    tplTransferComplete({ excReq, eventName, seat }),
+              html: tplTransferComplete({ excReq, eventName, seat }),
             });
           }
 
@@ -690,60 +728,60 @@ module.exports = async function handler(req, res) {
   // ============================================================
   if (action === 'finalize_exception') {
     const { request_id, recipient_phone, recipient_email, recipient_name, reason } = req.body;
-    if (!request_id)    return res.status(400).json({ error: 'request_id required' });
+    if (!request_id) return res.status(400).json({ error: 'request_id required' });
     if (!recipient_phone) return res.status(400).json({ error: 'recipient_phone required' });
 
     try {
       const { data: excReq } = await supabase.from('exception_requests').select('*').eq('id', request_id).maybeSingle();
-      if (!excReq)              return res.status(404).json({ error: 'Exception request not found' });
+      if (!excReq) return res.status(404).json({ error: 'Exception request not found' });
       if (!excReq.otp_verified) return res.status(400).json({ error: 'OTP not verified — complete Step 2 first' });
 
-      const recipientNorm  = normalizePhone(recipient_phone);
-      const rollingCount   = await getRollingExceptionCount(excReq.requestor_phone);
-      const repeatResale   = await detectRepeatResalePattern(excReq.requestor_phone);
+      const recipientNorm = normalizePhone(recipient_phone);
+      const rollingCount = await getRollingExceptionCount(excReq.requestor_phone);
+      const repeatResale = await detectRepeatResalePattern(excReq.requestor_phone);
 
       await supabase.from('exception_requests').update({
         recipient_phone: recipientNorm,
         recipient_email: recipient_email || null,
-        recipient_name:  recipient_name  || null,
-        reason:          reason          || null,
-        updated_at:      new Date().toISOString(),
+        recipient_name: recipient_name || null,
+        reason: reason || null,
+        updated_at: new Date().toISOString(),
       }).eq('id', request_id);
 
       await supabase.from('platform_exception_requests').insert({
-        id:                    'plat-' + request_id,
-        ticket_id:             excReq.ticket_id,
-        event_id:              excReq.event_id,
-        venue_id:              'casino-dania-beach',
-        requestor_phone:       excReq.requestor_phone,
-        requestor_email:       excReq.requestor_email || null,
-        requestor_name:        excReq.requestor_name  || null,
-        recipient_phone:       recipientNorm,
-        recipient_email:       recipient_email || null,
-        recipient_name:        recipient_name  || null,
-        reason:                reason          || null,
-        status:                'pending',
-        delivery_status:       'none',
-        otp_verified:          true,
+        id: 'plat-' + request_id,
+        ticket_id: excReq.ticket_id,
+        event_id: excReq.event_id,
+        venue_id: 'casino-dania-beach',
+        requestor_phone: excReq.requestor_phone,
+        requestor_email: excReq.requestor_email || null,
+        requestor_name: excReq.requestor_name || null,
+        recipient_phone: recipientNorm,
+        recipient_email: recipient_email || null,
+        recipient_name: recipient_name || null,
+        reason: reason || null,
+        status: 'pending',
+        delivery_status: 'none',
+        otp_verified: true,
         prior_exception_count: rollingCount,
-        repeat_resale_flag:    repeatResale,
-        approval_tier:         excReq.approval_tier,
+        repeat_resale_flag: repeatResale,
+        approval_tier: excReq.approval_tier,
       }).then(() => {}, e => console.error('Platform dual write error:', e.message));
 
       const { data: ticket } = await supabase.from('tickets').select('seat, event_name').eq('id', excReq.ticket_id).maybeSingle();
-      const eventName  = ticket?.event_name || excReq.event_id;
-      const seat       = ticket?.seat || '—';
+      const eventName = ticket?.event_name || excReq.event_id;
+      const seat = ticket?.seat || '—';
       const fullExcReq = { ...excReq, recipient_phone: recipientNorm, recipient_email, recipient_name, reason };
 
       sendNotificationEmail({
-        to:      VENUE_ADMIN_EMAIL,
+        to: VENUE_ADMIN_EMAIL,
         subject: `⚡ New Exception Transfer Request — ${eventName}`,
-        html:    tplExceptionReceived({ excReq: fullExcReq, eventName, seat, ticketId: excReq.ticket_id }),
+        html: tplExceptionReceived({ excReq: fullExcReq, eventName, seat, ticketId: excReq.ticket_id }),
       });
       sendNotificationEmail({
-        to:      PLATFORM_ADMIN_EMAIL,
+        to: PLATFORM_ADMIN_EMAIL,
         subject: `⚡ [Platform Copy] Exception Request — ${eventName}`,
-        html:    tplExceptionReceived({ excReq: fullExcReq, eventName, seat, ticketId: excReq.ticket_id }),
+        html: tplExceptionReceived({ excReq: fullExcReq, eventName, seat, ticketId: excReq.ticket_id }),
       });
 
       console.log(`zeroscalp/finalize_exception: ✓ request ${request_id} finalized`);
