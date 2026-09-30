@@ -87,7 +87,7 @@
 
 const Stripe = require('stripe');
 const { createClient } = require('@supabase/supabase-js');
-const { calcOCTLFees } = require('../lib/calcOCTLFees');
+const { calcOCTLFees, calcOnTop } = require('../lib/calcOCTLFees');
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY;
@@ -298,7 +298,48 @@ module.exports = async (req, res) => {
         );
     }
 
-    const splits = seats.map(seat => calcOCTLFees(Number(seat.price) || 0, 'card', { isResale: !!isExchange }));
+    // ── ON-TOP PRICING (Krazy Mike's, Sep 2026) ──────────────────────────────
+    // The venue enters FACE value; the service fee and sales tax are added on top and stored on the
+    // event: pricing.units.<type> = { face, fee, tax, price, count } and pricing.tax_rate. For those
+    // events the STORED breakdown, never the client's numbers, decides how the charge is itemized.
+    // Anything that does not add up to the cent falls back to the single all-in line every other
+    // venue uses, so a fan is never charged a different total than the seat price already validated.
+    let itemized = null;
+    let itemizedTaxPct = null;
+    const unitsMap = (!isExchange && event.pricing && event.pricing.units && typeof event.pricing.units === 'object') ? event.pricing.units : null;
+    if (unitsMap) {
+        itemizedTaxPct = (event.pricing.tax_rate !== null && event.pricing.tax_rate !== undefined && Number.isFinite(Number(event.pricing.tax_rate))) ? Number(event.pricing.tax_rate) : null;
+        const parts = [];
+        for (const seat of seats) {
+            const cents = Math.round((Number(seat.price) || 0) * 100);
+            const matches = u => u && Number(u.count) > 0 && Math.round((Number(u.price) || 0) * 100) === cents;
+            let u = seat.tierId ? unitsMap[seat.tierId] : null;
+            if (!matches(u)) u = Object.values(unitsMap).find(matches) || null;   // older clients send no tierId
+            if (!u) { parts.length = 0; break; }
+            const face = Math.round(Number(u.face) * 100);
+            const fee  = Math.round(Number(u.fee)  * 100);
+            const tax  = Math.round(Number(u.tax)  * 100);
+            if (![face, fee, tax].every(Number.isFinite) || face <= 0 || fee < 0 || tax < 0 || face + fee + tax !== cents) { parts.length = 0; break; }
+            const on = calcOnTop(face / 100, itemizedTaxPct);   // OCTL / venue split of the fee, by face value
+            parts.push({ face, fee, tax, octl: on.octl, venue: on.venue });
+        }
+        if (parts.length === seats.length) itemized = parts;
+    }
+
+    const splits = itemized
+        ? seats.map((seat, i) => {
+            const allIn = Math.round((Number(seat.price) || 0) * 100) / 100;
+            return {
+                allInPrice: allIn,
+                faceValue: itemized[i].face / 100,
+                serviceFeeGross: itemized[i].fee / 100,
+                stripeFee: Math.round((allIn * 0.029 + 0.30 + Number.EPSILON) * 100) / 100,
+                octlTake: itemized[i].octl,
+                venueNet: itemized[i].venue,
+            };
+        })
+        : seats.map(seat => calcOCTLFees(Number(seat.price) || 0, 'card', { isResale: !!isExchange }));
+    const taxCents = itemized ? itemized.reduce((s, p) => s + p.tax, 0) : 0;
 
     const allInCents  = splits.reduce((s, f) => s + Math.round(f.allInPrice      * 100), 0);
     const octlCents   = splits.reduce((s, f) => s + Math.round(f.octlTake        * 100), 0);
@@ -308,7 +349,7 @@ module.exports = async (req, res) => {
 
     try {
         // The fan is charged the ALL-IN price. Nothing is added on top.
-        const lineItems = seats.map((seat, i) => ({
+        const legacyLineItems = seats.map((seat, i) => ({
             price_data: {
                 currency: 'usd',
                 product_data: { name: `${eventName} — ${seat.label || seat.key} (${seat.tier || 'General'})` },
@@ -316,6 +357,21 @@ module.exports = async (req, res) => {
             },
             quantity: 1,
         }));
+
+        // On-top venues: Stripe's page lists each ticket at face value, then the service fee, then sales tax.
+        // The lines add up to exactly the same total as the single all-in lines above would have.
+        const lineItems = itemized ? [
+            ...seats.map((seat, i) => ({
+                price_data: {
+                    currency: 'usd',
+                    product_data: { name: `${eventName} — ${seat.label || seat.key} (${seat.tier || 'General'})` },
+                    unit_amount: itemized[i].face,
+                },
+                quantity: 1,
+            })),
+            ...(feeCents > 0 ? [{ price_data: { currency: 'usd', product_data: { name: 'Service fee' }, unit_amount: feeCents }, quantity: 1 }] : []),
+            ...(taxCents > 0 ? [{ price_data: { currency: 'usd', product_data: { name: itemizedTaxPct !== null ? `Sales tax (${+itemizedTaxPct.toFixed(3)}%)` : 'Sales tax' }, unit_amount: taxCents }, quantity: 1 }] : []),
+        ] : legacyLineItems;
 
         const successUrl = `${venueUrl}/#stripe_success=true&session_id={CHECKOUT_SESSION_ID}`;
         const cancelUrl  = `${venueUrl}/#stripe_cancel=true`;
@@ -347,12 +403,13 @@ module.exports = async (req, res) => {
             resale_ticket_id:(isExchange ? String(ticketId || '') : '').slice(0, 500),
             seats_json:      JSON.stringify(seats).slice(0, 500),
             // Flat-tier reconciliation record — server-derived, never client-supplied.
-            pricing_model:   isExchange ? 'flat-tier-v1-resale' : 'flat-tier-v1',
+            pricing_model:   isExchange ? 'flat-tier-v1-resale' : (itemized ? 'flat-tier-v2-ontop' : 'flat-tier-v1'),
             all_in_total:    (allInCents  / 100).toFixed(2),
             face_value:      (faceCents   / 100).toFixed(2),
             service_fee:     (feeCents    / 100).toFixed(2),  // DERIVED, replaces the old client value
             octl_take:       (octlCents   / 100).toFixed(2),
             stripe_est:      (stripeCents / 100).toFixed(2),
+            ...(itemized ? { sales_tax: (taxCents / 100).toFixed(2) } : {}),
         };
 
         const sessionParams = {
