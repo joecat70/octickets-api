@@ -1,13 +1,38 @@
 // ============================================================
-// /api/send.js
+// /api/send.js  ·  v2 (Sep 30 2026)
 // OC Tickets Live · Ten-20-22 Holdings LLC
 // Consolidated from: send-email.js, send-sms.js, send-verify.js
+//
+// v2 (Sep 30 2026, Joe) — two changes, nothing else touched:
+//   1. NEW type 'venue_payout_notice'. transfer-ticket.js has dispatched
+//      this type since Aug 19 2026 (see its header) whenever a Ticket
+//      Exchange resale completes, but this file had no branch for it, so
+//      every call fell through to "Unknown type" (400) and no venue ever
+//      received the notice — setting a venue's contact_payout_email did
+//      nothing. The branch emails the venue: the amount it now owes the
+//      seller (netPayout), the royalty it keeps (at that event's own
+//      percentage), the ticket, the seller, and how to pay the seller.
+//      Every seller-typed field (name, payout handle, event name) is
+//      HTML-escaped. It is its own type, and its own send, so a bad or
+//      missing venue address can never affect the seller's 'sold' email.
+//      Tested separately: 13 checks, including escaping and fall-through.
+//   2. The small line under the wordmark in the ticket-confirmation and
+//      'sold' emails read "octicketslive.eth · Reserved Seating". It now
+//      reads "octicketslive.com". The .eth text meant nothing to guests,
+//      and "Reserved Seating" was wrong for general-admission and table
+//      tickets.
+//   Also updated to name the new type: the Routes list just below, the
+//   "type required" error, and the "Unknown type" error at the end.
+//   NOT changed: the three 'https://octicketslive.eth.limo' fallback
+//   addresses (used only when a caller omits venueUrl), and every other
+//   branch of this file.
 //
 // Routes by req.body.type:
 //   'email'  → ticket confirmation email + claim token (was send-email.js)
 //   'sms'    → ticket SMS + claim token      (was send-sms.js)
 //   'verify' → listing/gift verification code email (was send-verify.js)
 //   'sold'   → seller sold-notification + remaining tickets (Aug 2026)
+//   'venue_payout_notice' → venue told what it owes the seller after a resale (Sep 2026)
 //
 // FIX (Aug 2026, Joe): new 'sold' type. Added because transfer-ticket.js's
 // resale-completion path sent NO email of any kind to the seller — no
@@ -96,7 +121,7 @@ module.exports = async function handler(req, res) {
   if (req.method !== 'POST')   return res.status(405).json({ error: 'Method not allowed' });
 
   const { type } = req.body || {};
-  if (!type) return res.status(400).json({ error: 'type required: email | sms | verify | sold' });
+  if (!type) return res.status(400).json({ error: 'type required: email | sms | verify | sold | venue_payout_notice' });
 
   // ============================================================
   // TYPE: email
@@ -184,7 +209,7 @@ module.exports = async function handler(req, res) {
         <table width="100%" cellpadding="0" cellspacing="0"><tr><td align="center">
           <div style="display:inline-block;background:#c9a84c;width:36px;height:36px;border-radius:50%;line-height:36px;text-align:center;font-size:18px;margin-bottom:10px">🎟</div>
           <div style="font-family:Georgia,serif;font-size:22px;font-weight:700;color:#f5f0e6;letter-spacing:4px;text-transform:uppercase">OC Tickets Live</div>
-          <div style="font-size:11px;color:#8a7f5c;letter-spacing:1px;margin-top:4px;font-family:monospace">octicketslive.eth · Reserved Seating</div>
+          <div style="font-size:11px;color:#8a7f5c;letter-spacing:1px;margin-top:4px;font-family:monospace">octicketslive.com</div>
         </td></tr></table>
       </td>
     </tr>
@@ -403,7 +428,7 @@ module.exports = async function handler(req, res) {
         <table width="100%" cellpadding="0" cellspacing="0"><tr><td align="center">
           <div style="display:inline-block;background:#c9a84c;width:36px;height:36px;border-radius:50%;line-height:36px;text-align:center;font-size:18px;margin-bottom:10px">💰</div>
           <div style="font-family:Georgia,serif;font-size:22px;font-weight:700;color:#f5f0e6;letter-spacing:4px;text-transform:uppercase">OC Tickets Live</div>
-          <div style="font-size:11px;color:#8a7f5c;letter-spacing:1px;margin-top:4px;font-family:monospace">octicketslive.eth · Reserved Seating</div>
+          <div style="font-size:11px;color:#8a7f5c;letter-spacing:1px;margin-top:4px;font-family:monospace">octicketslive.com</div>
         </td></tr></table>
       </td>
     </tr>
@@ -469,6 +494,91 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ success: true });
     } catch (err) {
       console.error('send/sold: unexpected error:', err);
+      return res.status(500).json({ success: false, error: 'Unexpected error', detail: err.message });
+    }
+  }
+
+  // ============================================================
+  // TYPE: venue_payout_notice  (Sep 2026)
+  // Sent by transfer-ticket.js to the venue's contact_payout_email when a Ticket
+  // Exchange resale completes: the venue withholds its royalty and now owes the
+  // seller netPayout. transfer-ticket.js has been dispatching this type since Aug 19
+  // 2026 (see its header); until this branch existed send.js answered 400 "Unknown
+  // type", so no venue ever received the notice. Every seller-supplied field is
+  // HTML-escaped: payoutHandle and sellerName are typed by the seller.
+  // ============================================================
+  if (type === 'venue_payout_notice') {
+    const {
+      email, ticketId, seat, eventName, sellerName,
+      resalePrice, royaltyAmount, royaltyPercent, netPayout,
+      payoutMethod, payoutHandle,
+    } = req.body;
+
+    if (!email || !ticketId) {
+      return res.status(400).json({ success: false, error: 'Missing email or ticketId' });
+    }
+
+    const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => (
+      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const money = n => (typeof n === 'number' && Number.isFinite(n)) ? `$${n.toFixed(2)}` : '--';
+    const pct = (typeof royaltyPercent === 'number' && Number.isFinite(royaltyPercent)) ? royaltyPercent : 10;
+    const hasMethod = !!(payoutMethod && payoutHandle);
+    const evName = eventName || 'Event';
+
+    const row = (label, value, last) => `
+          <tr><td style="padding:12px 16px${last ? '' : ';border-bottom:1px solid #1e1c14'}">
+            <div style="font-size:10px;color:#8a7f5c;letter-spacing:1.5px;text-transform:uppercase;font-family:monospace;margin-bottom:4px">${label}</div>
+            <div style="font-size:14px;color:#f5f0e6">${value}</div>
+          </td></tr>`;
+
+    const html = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Resale completed</title></head>
+<body style="margin:0;padding:0;background:#0a0900;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#0a0900;padding:32px 16px"><tr><td align="center">
+<table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%">
+  <tr><td style="background:#0e0c08;border:1px solid #2a2310;border-radius:8px 8px 0 0;padding:22px 32px;text-align:center;border-bottom:1px solid #c9a84c40">
+    <div style="font-family:Georgia,serif;font-size:20px;font-weight:700;color:#f5f0e6;letter-spacing:4px;text-transform:uppercase">Ticket Exchange</div>
+    <div style="font-size:11px;color:#8a7f5c;letter-spacing:1px;margin-top:4px;font-family:monospace">Resale completed &middot; payout due to the seller</div>
+  </td></tr>
+  <tr><td style="background:#0e0c08;border:1px solid #2a2310;border-top:none;padding:28px 32px">
+    <p style="margin:0 0 20px;font-size:15px;color:#d4c88a;line-height:1.6">
+      A ticket for <strong style="color:#f5f0e6">${esc(evName)}</strong> was resold through the Ticket Exchange.
+      The venue keeps its royalty and pays the seller the balance.
+    </p>
+    <table width="100%" cellpadding="0" cellspacing="0" style="background:#13110a;border:1px solid #2a2310;border-radius:6px;margin-bottom:20px">
+      ${row('Amount owed to the seller', `<span style="font-size:22px;font-weight:700;color:#c9a84c">${money(netPayout)}</span>`)}
+      ${row('Sale price', money(resalePrice))}
+      ${row(`Venue royalty (${esc(pct)}%) &mdash; yours to keep`, money(royaltyAmount))}
+      ${row('Ticket', esc(seat || ticketId))}
+      ${row('Seller', esc(sellerName || 'Guest'), !hasMethod)}
+      ${hasMethod ? row('Pay the seller via', `<strong>${esc(payoutMethod)}</strong> to <strong>${esc(payoutHandle)}</strong>`, true) : ''}
+    </table>
+    ${hasMethod ? '' : '<p style="margin:0 0 16px;font-size:12px;color:#8a7f5c">No payout method is on file for this seller. Check the Payouts tab in your admin.</p>'}
+    <p style="margin:0;font-size:11px;color:#6a6040;font-family:monospace;line-height:1.7">Ticket ID ${esc(ticketId)}. Mark it paid in the Payouts tab of your admin once you have sent the money.</p>
+  </td></tr>
+  <tr><td style="background:#080700;border:1px solid #2a2310;border-top:none;border-radius:0 0 8px 8px;padding:16px 32px;text-align:center">
+    <div style="font-size:10px;color:#4a4530;font-family:monospace;line-height:1.8">Powered by OC Tickets Live &middot; octicketslive.com</div>
+  </td></tr>
+</table></td></tr></table>
+</body></html>`;
+
+    try {
+      const resend = new Resend(process.env.RESEND_API_KEY);
+      const { error: emailError } = await resend.emails.send({
+        from:    'OC Tickets Live <tickets@octicketslive.com>',
+        to:      email,
+        subject: `Resale completed: ${money(netPayout)} owed to the seller - ${evName}`,
+        html,
+      });
+      if (emailError) {
+        console.error('send/venue_payout_notice: Resend error:', emailError);
+        return res.status(500).json({ success: false, error: 'Email delivery failed', detail: emailError });
+      }
+      console.log(`send/venue_payout_notice: sent to ${email} for ticket ${ticketId}`);
+      return res.status(200).json({ success: true });
+    } catch (err) {
+      console.error('send/venue_payout_notice: unexpected error:', err);
       return res.status(500).json({ success: false, error: 'Unexpected error', detail: err.message });
     }
   }
@@ -572,5 +682,5 @@ module.exports = async function handler(req, res) {
     }
   }
 
-  return res.status(400).json({ error: `Unknown type: ${type}. Must be email | sms | verify | sold` });
+  return res.status(400).json({ error: `Unknown type: ${type}. Must be email | sms | verify | sold | venue_payout_notice` });
 };
