@@ -251,6 +251,17 @@ module.exports = async (req, res) => {
                 });
             }
         });
+       
+        // Ticket-type venues (Krazy Mike's, Sep 2026): pricing.units = { <typeId>: { price, count } }.
+        // Only types actually on sale for this show (count above 0) contribute an allowed price.
+        // Purely additive: no other venue's pricing has a `units` key, so this never runs for them.
+        if (event.pricing.units && typeof event.pricing.units === 'object') {
+            Object.values(event.pricing.units).forEach(u => {
+                if (u && typeof u.price === 'number' && u.price > 0 && Number(u.count) > 0) {
+                    allowedPricesCents.add(Math.round(u.price * 100));
+                }
+            });
+        } 
     }
 
     if (allowedPricesCents.size === 0) {
