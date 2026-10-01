@@ -1,5 +1,18 @@
 // api/list-ticket.js
 //
+// v4 (2026-10-01, Joe) — NO EXCHANGE LISTING ONCE A TABLE HAS ADMITTED GUESTS. A table ticket ("... (admits 4)") is
+// admitted in stages (api/validate-ticket.js v2/v3 counts the guests in admitted_count). Once anyone from the party
+// is inside, the remaining admissions can no longer be sold on the Exchange: request-code and confirm-listing now
+// refuse with a clear message. The check runs at BOTH steps, and the final write to 'listed' is itself conditional
+// on admitted_count still being 0, so a scan that lands between the check and the write wins and the listing fails
+// instead of selling a part-used table.
+//   - Only tables with a party are looked at (party size comes from the "(admits N)" in the ticket's label, the
+//     same rule validate-ticket uses). Every other ticket, and every other venue's tickets, follow the exact same
+//     code path and queries as before.
+//   - Needs the admitted_count column (KrazyMikes_admitted_count_migration.sql, already run). If that lookup ever
+//     fails, listing a table fails closed with "Could not check admission status".
+//   - Gifting is NOT changed here: a part-admitted table can still be gifted, and the recipient gets what is left.
+//
 // OCTL Live Demo — ownership-verification security fixes (v3, 2026-08-16)
 //
 // v3 FIX: gift-confirm's two post-write emails (recipient's ticket
@@ -191,6 +204,32 @@ async function sendEmailSafe(payload) {
   }
 }
 
+// ── Tables with a party (v4) ─────────────────────────────────────────────────
+// "Table For 6 People - Table 2 (admits 6)" -> 6. Anything without that text is a single admission.
+function partySizeOf(seatText) {
+  const m = /\(admits (\d+)\)/i.exec(String(seatText || ''));
+  const n = m ? parseInt(m[1], 10) : 1;
+  return (Number.isFinite(n) && n > 1) ? n : 1;
+}
+
+const TABLE_ADMITTED_MSG = 'A table with guests already admitted cannot be listed on the Exchange.';
+
+// Ids, among these tickets, of tables that already have at least one guest admitted. null = the lookup failed.
+// Only tables with a party are queried; for any other ticket this makes no database call at all.
+async function partlyAdmittedIds(tickets) {
+  const tables = (tickets || []).filter(t => partySizeOf(t.seat) > 1);
+  if (tables.length === 0) return [];
+  const { data, error } = await supabase
+    .from('tickets')
+    .select('id, admitted_count')
+    .in('id', tables.map(t => t.id));
+  if (error || !data) {
+    console.error('partlyAdmittedIds lookup failed:', error && error.message);
+    return null;
+  }
+  return data.filter(r => Number(r.admitted_count) > 0).map(r => r.id);
+}
+
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -249,6 +288,14 @@ async function handleRequestCode(req, res) {
         ? 'These tickets are no longer available to list (already listed, sold, or transferred). Please refresh and try again.'
         : 'One of the selected tickets is no longer available to list. Please refresh and try again.',
     });
+  }
+
+  const admittedIds = await partlyAdmittedIds(tickets);
+  if (admittedIds === null) {
+    return res.status(500).json({ success: false, error: 'Could not check admission status. Please try again.' });
+  }
+  if (admittedIds.length > 0) {
+    return res.status(409).json({ success: false, error: TABLE_ADMITTED_MSG });
   }
 
   const distinctOwners = [...new Set(tickets.map(t => (t.buyer_email || '').toLowerCase()))];
@@ -354,6 +401,13 @@ async function handleConfirmListing(req, res) {
   if (notValid.length > 0) {
     return res.status(409).json({ success: false, error: 'One or more of these tickets changed status since verification. Please start over.' });
   }
+  const admittedNow = await partlyAdmittedIds(tickets);
+  if (admittedNow === null) {
+    return res.status(500).json({ success: false, error: 'Could not check admission status. Please try again.' });
+  }
+  if (admittedNow.length > 0) {
+    return res.status(409).json({ success: false, error: TABLE_ADMITTED_MSG });
+  }
   const stillSameOwner = tickets.every(
     t => (t.buyer_email || '').toLowerCase() === verification.owner_email.toLowerCase()
   );
@@ -372,12 +426,14 @@ async function handleConfirmListing(req, res) {
 
   const listedTickets = [];
   for (const t of tickets) {
-    const { data: updated, error: updateErr } = await supabase
+    let listQuery = supabase
       .from('tickets')
       .update({ status: 'listed', listed_price: p })
       .eq('id', t.id)
-      .eq('status', 'valid')
-      .select('id');
+      .eq('status', 'valid');
+    // A table: only list it if nobody has been admitted at this exact moment (a scan that just landed wins).
+    if (partySizeOf(t.seat) > 1) listQuery = listQuery.eq('admitted_count', 0);
+    const { data: updated, error: updateErr } = await listQuery.select('id');
 
     if (updateErr || !updated || updated.length === 0) {
       console.error(`confirm-listing status update failed for ${t.id}:`, updateErr && updateErr.message);
