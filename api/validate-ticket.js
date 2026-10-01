@@ -22,6 +22,29 @@
 // instead of hardcoding 'valid', and check the actual returned row(s), not
 // just `error`. A zero-row result now fails closed instead of reporting a
 // false VALID.
+//
+// v2 (2026-09-30, Joe) — MULTI-ADMIT TABLES. A table ticket ("... (admits 4)") is one ticket with one QR,
+// but a party rarely arrives together. Before: the first scan marked the whole ticket 'scanned' and
+// everyone arriving later was turned away. Now: each scan admits part of the party and the ticket stays
+// valid until all of them are in; only then does it flip to 'scanned'.
+//   - The party size is read from the ticket's own label, "(admits N)", the same text the door screen
+//     already shows. A ticket without one (every seat, GA and bar ticket, and every ticket at every
+//     other venue) has a party size of 1 and runs the original code path below, unchanged: same
+//     queries, same responses.
+//   - Progress is kept in two NEW columns on tickets (run the admitted_count migration first):
+//       admitted_count  integer, how many of the party are in
+//       last_totp_step  bigint,  the 30-second code window of the most recent admission
+//     They are read and written ONLY for multi-admit tickets, so a party-of-1 scan never touches them.
+//   - Each admission must come from a NEW code. The QR refreshes every 30 seconds, so a code that was
+//     already used cannot admit a second person (this also stops a scanner that is still pointed at the
+//     same phone from admitting extra guests). Door staff can instead admit several at once by sending
+//     admitCount (1 by default); it is capped at the number still to come.
+//   - The response keeps every existing field and adds admitted, partySize, admittedNow, remaining and
+//     complete. For a multi-admit ticket, ticket.seat in a VALID response has "(admits N)" rewritten to
+//     the number admitted by THIS scan, so a door screen that has not been updated yet shows "Admit 1"
+//     rather than "Admit 4". The untouched label is in ticket.seatFull.
+//   - If the two columns do not exist yet, a multi-admit scan fails closed with a clear message; every
+//     other ticket keeps working.
 
 const { createClient } = require('@supabase/supabase-js');
 const crypto = require('crypto');
@@ -33,8 +56,9 @@ const CORS = {
 };
 
 // ── TOTP verification (RFC 6238 / HMAC-SHA1) ─────────────────────────────────
-// Accepts current time step and ±1 step to account for clock drift and scan delay
-function verifyTOTP(hexSeed, code) {
+// Accepts current time step and ±1 step to account for clock drift and scan delay.
+// matchTOTP returns the 30-second step the code belongs to, or -1 when it matches none.
+function matchTOTP(hexSeed, code) {
   const key       = Buffer.from(hexSeed, 'hex');
   const timeStep  = Math.floor(Date.now() / 1000 / 30);
 
@@ -55,16 +79,118 @@ function verifyTOTP(hexSeed, code) {
        (hmac[offset+3] & 0xff)
     ) % 1_000_000;
 
-    if(String(otp).padStart(6, '0') === String(code).padStart(6, '0')) return true;
+    if(String(otp).padStart(6, '0') === String(code).padStart(6, '0')) return step;
   }
-  return false;
+  return -1;
 }
+// Same answer as before for callers that only need yes / no.
+function verifyTOTP(hexSeed, code) { return matchTOTP(hexSeed, code) !== -1; }
 
 // ── Scan window constants ─────────────────────────────────────────────────────
 // Scanning opens 2 hours before doors and closes 4 hours after doors.
 // Adjust these if venues need a different window.
 const SCAN_WINDOW_BEFORE_MS = 2 * 60 * 60 * 1000; // 2 hours before doors
 const SCAN_WINDOW_AFTER_MS  = 4 * 60 * 60 * 1000; // 4 hours after doors
+
+// ── Multi-admit tables ───────────────────────────────────────────────────────
+// "Table For 6 People - Table 2 (admits 6)" -> 6. Anything without that text is a single admission.
+function partySizeOf(seatText) {
+  const m = /\(admits (\d+)\)/i.exec(String(seatText || ''));
+  const n = m ? parseInt(m[1], 10) : 1;
+  return (Number.isFinite(n) && n > 1) ? n : 1;
+}
+
+async function admitTable({ db, res, ticket, ticketId, partySize, matchedStep, requested }) {
+  // Progress columns are read only here, so a party-of-1 scan never depends on them.
+  const { data: prog, error: progErr } = await db
+    .from('tickets')
+    .select('admitted_count, last_totp_step')
+    .eq('id', ticketId)
+    .maybeSingle();
+
+  if(progErr || !prog) {
+    console.error(`validate-ticket: multi-admit progress read failed for ${ticketId}:`, progErr && progErr.message);
+    return res.status(500).json({
+      valid:  false,
+      reason: 'Table admission tracking is not set up on the database yet — run the admitted_count migration',
+    });
+  }
+
+  const admittedBefore = Number.isFinite(Number(prog.admitted_count)) ? Number(prog.admitted_count) : 0;
+  const progress = (admitted) => ({ admitted, partySize, remaining: Math.max(0, partySize - admitted) });
+
+  if(admittedBefore >= partySize) {
+    return res.status(200).json({
+      valid:  false,
+      reason: `Already scanned — all ${partySize} guests on this table have been admitted`,
+      ...progress(admittedBefore),
+      ticket: { id: ticket.id, seat: ticket.seat },
+    });
+  }
+
+  // A code that already admitted someone cannot admit anyone else. The next one appears within 30 seconds.
+  if(matchedStep !== null && prog.last_totp_step !== null && prog.last_totp_step !== undefined
+     && matchedStep <= Number(prog.last_totp_step)) {
+    return res.status(200).json({
+      valid:  false,
+      reason: 'This code was already used for an admission — ask the guest to wait a few seconds for the QR to refresh, or admit several people with one scan',
+      ...progress(admittedBefore),
+      ticket: { id: ticket.id, seat: ticket.seat },
+    });
+  }
+
+  let want = parseInt(requested, 10);
+  if(!Number.isFinite(want) || want < 1) want = 1;
+  const admitNow       = Math.min(want, partySize - admittedBefore);
+  const admittedAfter  = admittedBefore + admitNow;
+  const complete       = admittedAfter >= partySize;
+  const scannedAt      = new Date().toISOString();
+
+  const patch = { admitted_count: admittedAfter, scanned_at: scannedAt };
+  if(matchedStep !== null) patch.last_totp_step = matchedStep;
+  if(complete) patch.status = 'scanned';   // everyone is in: from here on it behaves like any scanned ticket
+
+  // Only apply if nothing changed since we read it (status and count), and check the rows returned, not just `error`.
+  const { data: updated, error: updateError } = await db
+    .from('tickets')
+    .update(patch)
+    .eq('id', ticketId)
+    .eq('status', ticket.status)
+    .eq('admitted_count', admittedBefore)
+    .select('id');
+
+  if(updateError) {
+    console.error('Update error:', updateError);
+    return res.status(500).json({ valid: false, reason: 'Failed to record scan' });
+  }
+
+  if(!updated || updated.length === 0) {
+    console.warn(`validate-ticket: zero-row update for table ${ticketId} (expected status '${ticket.status}', admitted ${admittedBefore}) — race condition, failing closed`);
+    return res.status(200).json({
+      valid:  false,
+      reason: 'Scan could not be completed — ticket status changed during validation. Try scanning again.',
+    });
+  }
+
+  console.log(`✓ Admitted ${admitNow} (${admittedAfter}/${partySize}): ${ticketId} · ${ticket.seat} · ${scannedAt}`);
+
+  return res.status(200).json({
+    valid:       true,
+    scannedAt:   scannedAt,
+    ...progress(admittedAfter),
+    admittedNow: admitNow,
+    complete,
+    ticket: {
+      id:       ticket.id,
+      // Door screens that read "(admits N)" from the label show how many to let in for THIS scan.
+      seat:     String(ticket.seat).replace(/\(admits \d+\)/i, `(admits ${admitNow})`),
+      seatFull: ticket.seat,
+      seatKey:  ticket.seat_key,
+      eventId:  ticket.event_id,
+      buyerId:  ticket.buyer_id,
+    },
+  });
+}
 
 module.exports = async function handler(req, res) {
   // Preflight
@@ -123,11 +249,16 @@ module.exports = async function handler(req, res) {
     });
   }
 
+  // Party size from the ticket's own label (1 for everything except tables).
+  const partySize = partySizeOf(ticket.seat);
+
   // ── Already scanned ───────────────────────────────────────────────────────
   if(ticket.status === 'scanned') {
     return res.status(200).json({
       valid:      false,
-      reason:     'Already scanned — duplicate entry blocked',
+      reason:     partySize > 1
+        ? `Already scanned — all ${partySize} guests on this table have been admitted`
+        : 'Already scanned — duplicate entry blocked',
       scannedAt:  ticket.scanned_at,
       ticket: {
         id:   ticket.id,
@@ -223,17 +354,24 @@ module.exports = async function handler(req, res) {
   }
 
   // ── TOTP validation ───────────────────────────────────────────────────────
+  let matchedStep = null;   // the 30-second window this code belongs to (only used for multi-admit tables)
   if(!ticket.totp_seed) {
     // No seed on record — legacy ticket or data issue — allow entry but flag it
     console.warn(`Ticket ${ticketId} has no totp_seed — allowing entry without TOTP check`);
   } else {
-    const totpValid = verifyTOTP(ticket.totp_seed, totpCode);
+    matchedStep = matchTOTP(ticket.totp_seed, totpCode);
+    const totpValid = matchedStep !== -1;
     if(!totpValid) {
       return res.status(200).json({
         valid:  false,
         reason: 'QR code expired or invalid — ask guest to refresh their ticket',
       });
     }
+  }
+
+  // ── Table with a party: admit part of it and keep the ticket valid until all are in ──
+  if(partySize > 1) {
+    return admitTable({ db, res, ticket, ticketId, partySize, matchedStep, requested: (req.body || {}).admitCount });
   }
 
   // ── All checks passed — mark as scanned ──────────────────────────────────
