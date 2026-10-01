@@ -45,6 +45,18 @@
 //     rather than "Admit 4". The untouched label is in ticket.seatFull.
 //   - If the two columns do not exist yet, a multi-admit scan fails closed with a clear message; every
 //     other ticket keeps working.
+//
+// v3 (2026-10-01, Joe) — 15-SECOND QR CODES. A table of 8 where every guest scans separately had to wait up to
+// 30 seconds between admissions for a fresh code. The code check now accepts a code made with EITHER a 30-second
+// or a 15-second period (each with the same one-step tolerance either side). Every ticket page that exists today
+// draws 30-second codes and keeps working untouched; the Krazy Mike's page switches to 15 seconds from its own
+// next version. Deploy this file first, then publish that page.
+//   - Because the two periods have different step numbers, last_totp_step now stores the START TIME, in epoch
+//     seconds, of the 30- or 15-second window that admitted the last guest, so the "a code admits once" rule
+//     compares like with like. A value written by v2 (a 30-second step number, always under 1,000,000,000) is
+//     read as step * 30, so tables already part-admitted keep their place. No new migration is needed.
+//   - Cost: at any instant six codes are acceptable instead of three (still about 6 in a million per guess, and
+//     a guess also needs the ticket id). A party-of-1 ticket is otherwise untouched.
 
 const { createClient } = require('@supabase/supabase-js');
 const crypto = require('crypto');
@@ -56,30 +68,38 @@ const CORS = {
 };
 
 // ── TOTP verification (RFC 6238 / HMAC-SHA1) ─────────────────────────────────
-// Accepts current time step and ±1 step to account for clock drift and scan delay.
-// matchTOTP returns the 30-second step the code belongs to, or -1 when it matches none.
+// Accepts the current time step and ±1 step to account for clock drift and scan delay, for a code made with
+// either period in TOTP_PERIODS (seconds). matchTOTP returns the START TIME (epoch seconds) of the window the
+// code belongs to, or -1 when it matches none; larger means newer, whichever period it came from.
+const TOTP_PERIODS = [30, 15];   // 30: every ticket page built before Oct 2026. 15: Krazy Mike's from its public v1.7.
+
+function otpFor(key, step) {
+  const counter = Buffer.alloc(8);
+  let t = step;
+  for(let i = 7; i >= 0; i--) {
+    counter[i] = t & 0xff;
+    t = Math.floor(t / 256);
+  }
+
+  const hmac   = crypto.createHmac('sha1', key).update(counter).digest();
+  const offset = hmac[19] & 0xf;
+  const otp    = (
+    ((hmac[offset]   & 0x7f) << 24) |
+    ((hmac[offset+1] & 0xff) << 16) |
+    ((hmac[offset+2] & 0xff) <<  8) |
+     (hmac[offset+3] & 0xff)
+  ) % 1_000_000;
+  return String(otp).padStart(6, '0');
+}
+
 function matchTOTP(hexSeed, code) {
-  const key       = Buffer.from(hexSeed, 'hex');
-  const timeStep  = Math.floor(Date.now() / 1000 / 30);
-
-  for(const step of [timeStep, timeStep - 1, timeStep + 1]) {
-    const counter = Buffer.alloc(8);
-    let t = step;
-    for(let i = 7; i >= 0; i--) {
-      counter[i] = t & 0xff;
-      t = Math.floor(t / 256);
+  const key  = Buffer.from(hexSeed, 'hex');
+  const want = String(code).padStart(6, '0');
+  for(const period of TOTP_PERIODS) {
+    const timeStep = Math.floor(Date.now() / 1000 / period);
+    for(const step of [timeStep, timeStep - 1, timeStep + 1]) {
+      if(otpFor(key, step) === want) return step * period;
     }
-
-    const hmac   = crypto.createHmac('sha1', key).update(counter).digest();
-    const offset = hmac[19] & 0xf;
-    const otp    = (
-      ((hmac[offset]   & 0x7f) << 24) |
-      ((hmac[offset+1] & 0xff) << 16) |
-      ((hmac[offset+2] & 0xff) <<  8) |
-       (hmac[offset+3] & 0xff)
-    ) % 1_000_000;
-
-    if(String(otp).padStart(6, '0') === String(code).padStart(6, '0')) return step;
   }
   return -1;
 }
@@ -128,9 +148,11 @@ async function admitTable({ db, res, ticket, ticketId, partySize, matchedStep, r
     });
   }
 
-  // A code that already admitted someone cannot admit anyone else. The next one appears within 30 seconds.
-  if(matchedStep !== null && prog.last_totp_step !== null && prog.last_totp_step !== undefined
-     && matchedStep <= Number(prog.last_totp_step)) {
+  // A code that already admitted someone cannot admit anyone else. The next one appears within 15 or 30 seconds.
+  // last_totp_step holds the start time (epoch seconds) of the last admitting window; v2 stored a 30-second step number.
+  const lastRaw   = (prog.last_totp_step === null || prog.last_totp_step === undefined) ? NaN : Number(prog.last_totp_step);
+  const lastStart = Number.isFinite(lastRaw) ? (lastRaw < 1e9 ? lastRaw * 30 : lastRaw) : null;
+  if(matchedStep !== null && lastStart !== null && matchedStep <= lastStart) {
     return res.status(200).json({
       valid:  false,
       reason: 'This code was already used for an admission — ask the guest to wait a few seconds for the QR to refresh, or admit several people with one scan',
@@ -354,7 +376,7 @@ module.exports = async function handler(req, res) {
   }
 
   // ── TOTP validation ───────────────────────────────────────────────────────
-  let matchedStep = null;   // the 30-second window this code belongs to (only used for multi-admit tables)
+  let matchedStep = null;   // start time (epoch seconds) of the 30- or 15-second window this code belongs to (only used for multi-admit tables)
   if(!ticket.totp_seed) {
     // No seed on record — legacy ticket or data issue — allow entry but flag it
     console.warn(`Ticket ${ticketId} has no totp_seed — allowing entry without TOTP check`);
