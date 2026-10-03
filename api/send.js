@@ -1,7 +1,26 @@
 // ============================================================
-// /api/send.js  ·  v2 (Sep 30 2026)
+// /api/send.js  ·  v3 (Oct 3 2026)
 // OC Tickets Live · Ten-20-22 Holdings LLC
 // Consolidated from: send-email.js, send-sms.js, send-verify.js
+//
+// v3 (Oct 3 2026, Joe) — ticket-confirmation email ('email' type) only, nothing else touched:
+//   The email always called the tickets "Your Seat" / "Your Seats", with a "Seat" column, and ended with "Do not share
+//   this email or your claim link with anyone". That is wrong for two kinds of ticket Krazy Mike's sells:
+//   - A TABLE ticket ("... (admits 4)") is one ticket for a whole party, and the party rarely arrives together. The
+//     door admits part of the party with each scan (api/validate-ticket.js), so the link has to be shared with the
+//     guests. The email now says so: heading "Your Table(s)", column "Table", a box explaining that the ticket admits
+//     the whole party and can be shared by link with the guests at the table, and a share line that tells the holder
+//     to share it only with their table instead of telling them to share it with no one.
+//   - GENERAL ADMISSION has no seat. The heading is "Your Ticket(s)" and the column "Ticket".
+//   - Only seats (and nothing else) keep "Your Seat(s)" / "Seat". An order that mixes kinds says "Your Tickets".
+//   How the kind is decided: the same rule the door uses, from the ticket's own label. "(admits N)" with N above 1 is a
+//   table; a label starting "General Admission" is GA; everything else is a seat. An order of seats only produces the
+//   same email, byte for byte, as v2. The subject line, the secure link, the rotating-QR note and every other branch
+//   ('sold', 'venue_payout_notice', 'sms', 'verify') are unchanged. The text the new box adds uses only the party
+//   size read from the label (a number), nothing typed by a guest.
+//   NOT changed, and worth knowing: in this branch the buyer's name, the event name and the seat labels are put into the
+//   HTML without escaping (the 'venue_payout_notice' branch does escape). A name typed with markup in it, for example in a
+//   gift to someone else, would be rendered by the email client.
 //
 // v2 (Sep 30 2026, Joe) — two changes, nothing else touched:
 //   1. NEW type 'venue_payout_notice'. transfer-ticket.js has dispatched
@@ -143,6 +162,20 @@ module.exports = async function handler(req, res) {
     const primaryId    = allTicketIds[0];
     const baseUrl      = (venueUrl || 'https://octicketslive.eth.limo').replace(/\/+$/, '');
 
+    // v3: what kind of tickets are these? Same rule the door uses (api/validate-ticket.js): "(admits N)" above 1 is a table.
+    const partyOf = s => { const m = /\(admits (\d+)\)/i.exec(String(s || '')); const n = m ? parseInt(m[1], 10) : 1; return (Number.isFinite(n) && n > 1) ? n : 1; };
+    const kindOf  = s => partyOf(s) > 1 ? 'table' : (/^\s*general admission/i.test(String(s || '')) ? 'ga' : 'seat');
+    const kinds        = allSeats.map(kindOf);
+    const allAreSeats  = kinds.every(k => k === 'seat');
+    const allAreTables = kinds.every(k => k === 'table');
+    const hasTable     = kinds.includes('table');
+    const parties      = allSeats.map(partyOf).filter(n => n > 1);
+    const listHeading  = allAreSeats  ? (totalCount === 1 ? 'Your Seat'   : `Your Seats (${totalCount})`)
+                       : allAreTables ? (totalCount === 1 ? 'Your Table'  : `Your Tables (${totalCount})`)
+                       :                (totalCount === 1 ? 'Your Ticket' : `Your Tickets (${totalCount})`);
+    const listColumn   = allAreSeats ? 'Seat' : (allAreTables ? 'Table' : 'Ticket');
+    const partyText    = parties.length === 1 ? `your whole party of ${parties[0]}` : `its whole party (${parties.join(' and ')} guests)`;
+
     const token     = uuidv4();
     const expiresAt = farFutureExpiry();
 
@@ -228,17 +261,26 @@ module.exports = async function handler(req, res) {
           </td></tr>
           <tr><td style="padding:16px">
             <div style="font-size:10px;color:#8a7f5c;letter-spacing:1.5px;text-transform:uppercase;font-family:monospace;margin-bottom:8px">
-              ${totalCount === 1 ? 'Your Seat' : `Your Seats (${totalCount})`}
+              ${listHeading}
             </div>
             <table width="100%" cellpadding="0" cellspacing="0">
               <tr>
                 <th style="padding:8px 16px;background:#0a0900;font-size:10px;color:#8a7f5c;text-transform:uppercase;letter-spacing:1px;font-family:monospace;font-weight:400;text-align:left">Ticket ID</th>
-                <th style="padding:8px 16px;background:#0a0900;font-size:10px;color:#8a7f5c;text-transform:uppercase;letter-spacing:1px;font-family:monospace;font-weight:400;text-align:left">Seat</th>
+                <th style="padding:8px 16px;background:#0a0900;font-size:10px;color:#8a7f5c;text-transform:uppercase;letter-spacing:1px;font-family:monospace;font-weight:400;text-align:left">${listColumn}</th>
               </tr>
               ${seatRows}
             </table>
           </td></tr>
-        </table>
+        </table>${hasTable ? `
+        <table width="100%" cellpadding="0" cellspacing="0" style="background:#13110a;border:1px solid #c9a84c40;border-radius:6px;margin-bottom:24px">
+          <tr><td style="padding:16px">
+            <div style="font-size:10px;color:#8a7f5c;letter-spacing:1.5px;text-transform:uppercase;font-family:monospace;margin-bottom:8px">Your table can arrive at different times</div>
+            <div style="font-size:13px;color:#d4c88a;line-height:1.7">
+              Each table ticket admits ${partyText}. Your guests do not need to arrive together: send them the ticket link below.
+              Each guest opens it on their own phone and shows the live code at the door, and the door lets in part of your party with each scan until everyone is in.
+            </div>
+          </td></tr>
+        </table>` : ''}
         <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px">
           <tr><td align="center">
             <a href="${claimUrl}" style="display:inline-block;background:#c9a84c;color:#000;text-decoration:none;font-weight:700;font-size:14px;letter-spacing:1px;padding:14px 36px;border-radius:4px;text-transform:uppercase">
@@ -258,7 +300,7 @@ module.exports = async function handler(req, res) {
             <div style="font-size:11px;color:#6a6040;line-height:1.7;font-family:monospace">
               🔒 Your ticket includes a rotating QR code that refreshes every 15 seconds.<br>
               Screenshots are not valid at the door — always open your live ticket link.<br>
-              Do not share this email or your claim link with anyone.
+              ${hasTable ? 'Share this email and your ticket link only with the guests at your table. Anyone with the link can use the admissions that are still unused.' : 'Do not share this email or your claim link with anyone.'}
             </div>
           </td></tr>
         </table>
